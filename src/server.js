@@ -26,7 +26,13 @@ app.use('/api/intercity', require('./routes/intercity'));
 app.use('/api/admin', require('./routes/admin'));
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
-app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use(express.static(path.join(__dirname, '..', 'public'), {
+  setHeaders(res, file) {
+    // The service worker and app shell must always be revalidated so updates reach phones straight away
+    if (/(sw\.js|index\.html|app\.js|styles\.css)$/.test(file)) res.set('Cache-Control', 'no-cache');
+    if (file.endsWith('.webmanifest')) res.set('Content-Type', 'application/manifest+json');
+  }
+}));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 
 app.use((err, req, res, next) => {

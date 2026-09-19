@@ -77,21 +77,63 @@ const BONNY = [4.4380, 7.1650];
 const agoText = (t) => { if (!t) return ''; const s = Math.max(0, Math.round((Date.now() - new Date(t)) / 1000)); return s < 60 ? `${s}s ago` : `${Math.round(s / 60)} min ago`; };
 
 // Creates a Leaflet map in `el`. update(track) moves the vehicle, draws the trail and pickup.
+// Bonny Island area; island maps can't be dragged far away from it
+const BONNY_BOUNDS = [[4.30, 7.02], [4.58, 7.36]];
+
+// Base maps. Satellite (Esri World Imagery, no key needed) shows Bonny's buildings and roads far better than
+// OpenStreetMap, which has little street data for the island. The choice is remembered on the phone.
+function baseLayers() {
+  const esri = (svc) => `https://server.arcgisonline.com/ArcGIS/rest/services/${svc}/MapServer/tile/{z}/{y}/{x}`;
+  const satellite = L.layerGroup([
+    L.tileLayer(esri('World_Imagery'), { maxNativeZoom: 18, maxZoom: 20, attribution: 'Imagery © Esri, Maxar' }),
+    L.tileLayer(esri('Reference/World_Transportation'), { maxNativeZoom: 18, maxZoom: 20, opacity: .9 }),
+    L.tileLayer(esri('Reference/World_Boundaries_and_Places'), { maxNativeZoom: 18, maxZoom: 20 })
+  ]);
+  const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxNativeZoom: 19, maxZoom: 20, attribution: '© OpenStreetMap' });
+  return { 'Satellite': satellite, 'Streets': streets };
+}
+
 // selfVehicle: this phone is inside the vehicle (passenger during the trip), so its own GPS moves the vehicle icon.
-function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false, onFix = null, onGpsError = null } = {}) {
-  if (!window.L) { el.innerHTML = '<p class="muted small" style="padding:1rem">Map could not load. Check your connection.</p>'; return { update() {}, me() {} }; }
-  const m = L.map(el, { zoomControl: true }).setView(BONNY, 14);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(m);
-  let veh = null, meDot = null, pick = null, line = null, follow = true, fitted = false, last = null, source = null, selfAt = 0, dead = false;
-  m.on('dragstart zoomstart', (e) => { if (e.originalEvent || e.type === 'dragstart') follow = false; });
+// island: keep the map on Bonny Island (off for Port Harcourt trips).
+function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false, onFix = null, onGpsError = null, island = true } = {}) {
+  if (!window.L) { el.innerHTML = '<p class="muted small" style="padding:1rem">Map could not load. Check your connection.</p>'; return { update() {}, me() {}, destroy() {} }; }
+  const m = L.map(el, {
+    zoomControl: true, minZoom: island ? 12 : 8, maxZoom: 20, zoomSnap: 0.5, tap: true,
+    maxBounds: island ? BONNY_BOUNDS : null, maxBoundsViscosity: island ? 0.8 : 0
+  }).setView(BONNY, 14);
+  el._wakaMap = m;
+  const layers = baseLayers();
+  let saved = null; try { saved = localStorage.getItem('waka_map'); } catch {}
+  (layers[saved] || layers.Satellite).addTo(m);
+  L.control.layers(layers, null, { position: 'topright', collapsed: true }).addTo(m);
+  m.on('baselayerchange', (e) => { try { localStorage.setItem('waka_map', e.name); } catch {} });
+
+  let veh = null, meDot = null, pick = null, line = null, last = null, source = null, selfAt = 0, dead = false;
+  let centred = false;      // the map centres itself once, then never changes the user's zoom
+  let follow = true;        // follow the vehicle (panning only, zoom untouched) until the user drags away
+  let touchAt = 0;          // don't move the map while the user's fingers are on it
+  const busy = () => Date.now() - touchAt < 2500 || m._animatingZoom;
+  ['touchstart', 'mousedown', 'wheel', 'touchmove'].forEach(ev => el.addEventListener(ev, () => { touchAt = Date.now(); }, { passive: true }));
+  m.on('dragstart', () => { follow = false; renderMeta(); });
+
   const vIcon = L.divIcon({ className: '', html: `<div class="vi">${icon}</div>`, iconSize: [38, 38], iconAnchor: [19, 19] });
   const pIcon = L.divIcon({ className: '', html: '<div class="pin">📍</div>', iconSize: [28, 28], iconAnchor: [14, 28] });
+
+  function centreOnce() {
+    if (centred) return;
+    const pts = [veh, pick, meDot].filter(Boolean).map(x => x.getLatLng());
+    if (!pts.length) return;
+    centred = true;
+    if (pts.length > 1) m.fitBounds(pts, { padding: [50, 50], maxZoom: 17 }); else m.setView(pts[0], 17);
+  }
+  function followTo(ll) { if (centred && follow && !busy()) m.panTo(ll, { animate: true, duration: 0.6 }); }
+
   const api = {
     map: m,
     update(t) {
       if (!t || dead) return;
       if (t.pickup && !pick) pick = L.marker([t.pickup.lat, t.pickup.lng], { icon: pIcon, title: 'Pickup' }).addTo(m);
-      if (t.trail && t.trail.length > 1) { if (line) line.setLatLngs(t.trail); else line = L.polyline(t.trail, { color: '#0E4D5C', weight: 5, opacity: .75 }).addTo(m); }
+      if (t.trail && t.trail.length > 1) { if (line) line.setLatLngs(t.trail); else line = L.polyline(t.trail, { color: '#F2C230', weight: 6, opacity: .9 }).addTo(m); }
       // This phone's own fix wins over the server's copy while it's fresh (it's instant and it's the same vehicle)
       const selfFresh = selfVehicle && Date.now() - selfAt < 20000;
       const v = selfFresh ? null : t.vehicle;
@@ -99,46 +141,63 @@ function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false
         const ll = [v.lat, v.lng];
         if (veh) veh.setLatLng(ll); else veh = L.marker(ll, { icon: vIcon, title: 'Vehicle', zIndexOffset: 1000 }).addTo(m);
         last = v.at; source = v.source;
-        if (!fitted) { fitted = true; const pts = [ll]; if (pick) pts.push(pick.getLatLng()); if (meDot) pts.push(meDot.getLatLng()); pts.length > 1 ? m.fitBounds(pts, { padding: [40, 40], maxZoom: 17 }) : m.setView(ll, 16); }
-        else if (follow) m.panTo(ll, { animate: true });
-      } else if (!fitted && pick) { m.setView(pick.getLatLng(), 16); }
+        followTo(ll);
+      }
+      centreOnce();
       renderMeta();
     },
-    me(lat, lng, acc) {
+    me(lat, lng) {
       if (dead) return;
+      const ll = [lat, lng];
       if (selfVehicle) {
-        const ll = [lat, lng];
         selfAt = Date.now(); last = new Date().toISOString(); source = 'you';
         if (veh) veh.setLatLng(ll); else veh = L.marker(ll, { icon: vIcon, title: 'You (in the vehicle)', zIndexOffset: 1000 }).addTo(m);
-        if (!fitted) { fitted = true; m.setView(ll, 16); } else if (follow) m.panTo(ll, { animate: true });
-        renderMeta(); return;
+        centreOnce(); followTo(ll); renderMeta(); return;
       }
-      if (meDot) meDot.setLatLng([lat, lng]);
-      else meDot = L.circleMarker([lat, lng], { radius: 8, color: '#fff', weight: 3, fillColor: '#1E73E8', fillOpacity: 1 }).addTo(m).bindTooltip('You');
-      if (!veh && !pick && !fitted) m.setView([lat, lng], 16);
+      if (meDot) meDot.setLatLng(ll);
+      else meDot = L.circleMarker(ll, { radius: 8, color: '#fff', weight: 3, fillColor: '#1E73E8', fillOpacity: 1 }).addTo(m).bindTooltip('You');
+      centreOnce();
     },
-    recenter() { if (dead) return; follow = true; if (veh) m.setView(veh.getLatLng(), 16); else if (meDot) m.setView(meDot.getLatLng(), 16); }
+    recenter() {
+      if (dead) return;
+      follow = true; touchAt = 0;
+      const target = veh || meDot || pick;
+      if (target) m.setView(target.getLatLng(), Math.max(m.getZoom(), 16));
+      renderMeta();
+    }
   };
+
+  // Full-screen toggle: the map fills the phone screen, handy while watching a trip
+  let full = false;
+  function setFull(on) {
+    full = on; el.classList.toggle('map-full', on); document.body.classList.toggle('map-open', on);
+    closeBtn.hidden = !on;
+    setTimeout(() => { if (!dead) m.invalidateSize(); }, 200);
+  }
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button'; closeBtn.className = 'map-close'; closeBtn.textContent = 'Close map'; closeBtn.hidden = true;
+  closeBtn.onclick = () => setFull(false);
+  el.appendChild(closeBtn);
+  L.DomEvent.disableClickPropagation(closeBtn);
+
   function renderMeta() {
     if (!metaEl || dead) return;
-    if (!last) { metaEl.innerHTML = `<span>Waiting for the vehicle's GPS…</span><button class="link" type="button">Recenter</button>`; }
-    else {
-      const stale = Date.now() - new Date(last) > 60000;
-      const src = { you: "your phone's GPS", passenger: "passenger's phone", driver: "driver's phone" }[source] || '';
-      metaEl.innerHTML = `<span class="${stale ? 'stale' : 'live'}">${stale ? '● GPS not updating' : '● Live'}</span><span>${src ? src + ' · ' : ''}${agoText(last)}</span><button class="link" type="button">Recenter</button>`;
-    }
-    metaEl.querySelector('button').onclick = () => api.recenter();
+    const src = { you: "your phone's GPS", passenger: "passenger's phone", driver: "driver's phone" }[source] || '';
+    const status = !last ? '<span>Waiting for GPS…</span>'
+      : (Date.now() - new Date(last) > 60000 ? '<span class="stale">● GPS not updating</span>' : '<span class="live">● Live</span>');
+    metaEl.innerHTML = `${status}<span>${last ? (src ? src + ' · ' : '') + agoText(last) : ''}</span>
+      <span class="map-btns">${follow ? '' : '<button class="link" type="button" data-mb="recenter">Recenter</button>'}<button class="link" type="button" data-mb="full">Full screen</button></span>`;
+    metaEl.querySelectorAll('[data-mb]').forEach(b => b.onclick = () => (b.dataset.mb === 'full' ? setFull(true) : api.recenter()));
   }
   renderMeta();
   const tick = setInterval(renderMeta, 5000);
-  // The passenger's own blue dot, from their phone
+
   let watch = null;
   if ((showMe || selfVehicle) && navigator.geolocation) watch = navigator.geolocation.watchPosition(
-    p => { api.me(p.coords.latitude, p.coords.longitude, p.coords.accuracy); if (onFix) onFix(p.coords); },
+    p => { api.me(p.coords.latitude, p.coords.longitude); if (onFix) onFix(p.coords); },
     e => { if (onGpsError) onGpsError(e); }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
   setTimeout(() => { if (!dead) m.invalidateSize(); }, 150);
-  const destroy = () => { if (dead) return; dead = true; clearInterval(tick); if (watch != null) navigator.geolocation.clearWatch(watch); m.stop(); m.remove(); };
-  api.destroy = destroy;
+  api.destroy = () => { if (dead) return; dead = true; if (full) setFull(false); clearInterval(tick); if (watch != null) navigator.geolocation.clearWatch(watch); m.stop(); m.remove(); };
   return api;
 }
 
@@ -188,8 +247,10 @@ const GPS = {
 document.addEventListener('visibilitychange', () => { if (!document.hidden && GPS.timer && GPS.every <= 5000) GPS.keepAwake(true); });
 
 // ---------- navigation ----------
+const NAV_ICON = { ride: '🛺', intercity: '🚌', trips: '🧾', account: '👤', driver: '🧭', admin: '📊' };
 function nav(items) {
-  $('#nav').innerHTML = items.map(([k, label]) => `<button data-nav="${k}" ${S.view === k ? 'aria-current="page"' : ''}>${label}</button>`).join('');
+  document.body.classList.toggle('has-tabs', items.length > 0);
+  $('#nav').innerHTML = items.map(([k, label]) => `<button data-nav="${k}" ${S.view === k ? 'aria-current="page"' : ''}><span class="ni" aria-hidden="true">${NAV_ICON[k] || '•'}</span><span class="nl">${label}</span></button>`).join('');
   $$('#nav [data-nav]').forEach(b => b.onclick = () => go(b.dataset.nav));
 }
 function menuFor() {
@@ -398,7 +459,7 @@ function renderActive(r) {
   let lm = null;
   if ($('#map')) {
     const onTrip = r.status === 'started';
-    let fix = null, sentAt = 0;
+    let fix = null, sentAt = 0, gotFix = false;
     const send = (force) => {
       if (!fix || (!force && Date.now() - sentAt < 5000)) return;
       sentAt = Date.now();
@@ -406,8 +467,8 @@ function renderActive(r) {
     };
     lm = liveMap($('#map'), $('#mapMeta'), {
       icon: VEH_ICON[r.vehicle_type], selfVehicle: onTrip,
-      onFix: onTrip ? (c) => { fix = c; send(); } : null,
-      onGpsError: (e) => { const n = $('#paxGps'); if (n) { n.hidden = false; n.textContent = e.code === 1
+      onFix: (c) => { gotFix = true; const n = $('#paxGps'); if (n) n.hidden = true; if (onTrip) { fix = c; send(); } },
+      onGpsError: (e) => { const n = $('#paxGps'); if (!n || (e.code !== 1 && gotFix)) return; { n.hidden = false; n.textContent = e.code === 1
         ? "Location is blocked on this phone. Allow location for this site to see exactly where you are. You'll see the driver's GPS until then."
         : "Can't get your GPS right now. Showing the driver's GPS instead."; } }
     });
@@ -569,7 +630,7 @@ async function viewIntercity() {
 
 function trackBookingSheet(id, veh) {
   sheet(`<h3>Where's my ${VEH[veh] ? VEH[veh].toLowerCase() : 'vehicle'}?</h3>${MAP_BLOCK}<button class="btn ghost" id="closeS">Close</button>`, true);
-  const lm = liveMap($('#map'), $('#mapMeta'), { icon: VEH_ICON[veh] || '🚐' });
+  const lm = liveMap($('#map'), $('#mapMeta'), { icon: VEH_ICON[veh] || '🚐', island: false });
   const load = () => api(`/intercity/bookings/${id}/track`).then(t => lm.update(t)).catch(() => {});
   load(); const timer = setInterval(load, 5000);
   S.sheetCleanup = () => { clearInterval(timer); lm.destroy && lm.destroy(); };
@@ -938,6 +999,10 @@ async function adSettings(el) {
 
 // ---------- boot ----------
 async function loadMeta() { S.meta = await api('/public/meta', { auth: false }); }
+
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}
 
 (async function boot() {
   try { await loadMeta(); } catch (e) { app.innerHTML = `<div class="notice bad">Can't reach the Waka Bonny server. Check your connection and reload.</div>`; return; }
