@@ -60,7 +60,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet()
 function poll(fn, ms = 4000) { stopPoll(); S.poll = setInterval(() => { if (!document.hidden) fn().catch(() => {}); }, ms); }
 function stopPoll() { if (S.poll) clearInterval(S.poll); S.poll = null; }
 
-function busy(btn, on) { if (!btn) return; btn.disabled = on; if (on) { btn.dataset.t = btn.textContent; btn.textContent = 'Please wait…'; } else if (btn.dataset.t) btn.textContent = btn.dataset.t; }
+function busy(btn, on) { if (!btn) return; btn.disabled = on; if (on) { btn._label = btn.textContent; btn.textContent = 'Please wait…'; } else if (btn._label != null) { btn.textContent = btn._label; btn._label = null; } }
 async function act(btn, fn) { busy(btn, true); try { await fn(); } catch (e) { fail(e); } finally { busy(btn, false); } }
 
 const zoneOptions = (sel, placeholder = 'Choose area') =>
@@ -82,6 +82,7 @@ function menuFor() {
 function go(view, push = true) {
   stopPoll(); closeSheet();
   S.view = view;
+  try { sessionStorage.setItem('waka_view', view); } catch {}
   if (push) history.replaceState(null, '', '/');
   app.classList.toggle('wide', view === 'admin');
   nav(menuFor());
@@ -91,10 +92,13 @@ function go(view, push = true) {
 function home() {
   const u = S.user;
   if (!u) return go('auth');
+  // Return to the tab the user was on before a refresh, if their role allows it
+  let saved = null; try { saved = sessionStorage.getItem('waka_view'); } catch {}
+  if (saved && menuFor().some(([k]) => k === saved)) return go(saved);
   go(u.role === 'admin' ? 'admin' : u.role === 'driver' ? 'driver' : 'ride');
 }
 function signOut(msg = true) {
-  S.token = null; S.user = null; localStorage.removeItem('waka_token');
+  S.token = null; S.user = null; localStorage.removeItem('waka_token'); try { sessionStorage.removeItem('waka_view'); } catch {}
   if (msg) toast('Signed out.');
   go('auth');
 }
