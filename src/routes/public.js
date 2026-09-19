@@ -22,7 +22,7 @@ router.get('/quote', wrap(async (req, res) => {
 
 // Public trip-share link (no sign-in) — shows only what family needs
 router.get('/share/:token', wrap(async (req, res) => {
-  const r = (await q(`SELECT r.id, r.driver_id, r.pickup_lat, r.pickup_lng, r.status, r.vehicle_type, r.created_at, r.started_at, r.completed_at,
+  const r = (await q(`SELECT r.id, r.driver_id, r.pickup_lat, r.pickup_lng, r.pax_lat, r.pax_lng, r.pax_loc_at, r.status, r.vehicle_type, r.created_at, r.started_at, r.completed_at,
       fz.name AS from_name, tz.name AS to_name, r.pickup_note, r.dropoff_note,
       split_part(p.name,' ',1) AS passenger, du.name AS driver_name, d.plate, d.permit_no, d.vehicle_desc
     FROM rides r JOIN zones fz ON fz.id=r.from_zone JOIN zones tz ON tz.id=r.to_zone
@@ -31,7 +31,7 @@ router.get('/share/:token', wrap(async (req, res) => {
     WHERE r.token=$1`, [req.params.token])).rows[0];
   if (!r) throw new HttpError(404, 'This trip link is not valid.');
   const track = await rideTrack(r);
-  delete r.id; delete r.driver_id; delete r.pickup_lat; delete r.pickup_lng;
+  delete r.id; delete r.driver_id; delete r.pickup_lat; delete r.pickup_lng; delete r.pax_lat; delete r.pax_lng; delete r.pax_loc_at;
   res.json({ ...r, track });
 }));
 

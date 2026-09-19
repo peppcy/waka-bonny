@@ -77,42 +77,55 @@ const BONNY = [4.4380, 7.1650];
 const agoText = (t) => { if (!t) return ''; const s = Math.max(0, Math.round((Date.now() - new Date(t)) / 1000)); return s < 60 ? `${s}s ago` : `${Math.round(s / 60)} min ago`; };
 
 // Creates a Leaflet map in `el`. update(track) moves the vehicle, draws the trail and pickup.
-function liveMap(el, metaEl, { icon = '🛺', showMe = true } = {}) {
+// selfVehicle: this phone is inside the vehicle (passenger during the trip), so its own GPS moves the vehicle icon.
+function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false, onFix = null, onGpsError = null } = {}) {
   if (!window.L) { el.innerHTML = '<p class="muted small" style="padding:1rem">Map could not load. Check your connection.</p>'; return { update() {}, me() {} }; }
   const m = L.map(el, { zoomControl: true }).setView(BONNY, 14);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(m);
-  let veh = null, meDot = null, pick = null, line = null, follow = true, fitted = false, last = null;
+  let veh = null, meDot = null, pick = null, line = null, follow = true, fitted = false, last = null, source = null, selfAt = 0, dead = false;
   m.on('dragstart zoomstart', (e) => { if (e.originalEvent || e.type === 'dragstart') follow = false; });
   const vIcon = L.divIcon({ className: '', html: `<div class="vi">${icon}</div>`, iconSize: [38, 38], iconAnchor: [19, 19] });
   const pIcon = L.divIcon({ className: '', html: '<div class="pin">📍</div>', iconSize: [28, 28], iconAnchor: [14, 28] });
   const api = {
     map: m,
     update(t) {
-      if (!t) return;
+      if (!t || dead) return;
       if (t.pickup && !pick) pick = L.marker([t.pickup.lat, t.pickup.lng], { icon: pIcon, title: 'Pickup' }).addTo(m);
       if (t.trail && t.trail.length > 1) { if (line) line.setLatLngs(t.trail); else line = L.polyline(t.trail, { color: '#0E4D5C', weight: 5, opacity: .75 }).addTo(m); }
-      if (t.driver) {
-        const ll = [t.driver.lat, t.driver.lng];
+      // This phone's own fix wins over the server's copy while it's fresh (it's instant and it's the same vehicle)
+      const selfFresh = selfVehicle && Date.now() - selfAt < 20000;
+      const v = selfFresh ? null : t.vehicle;
+      if (v) {
+        const ll = [v.lat, v.lng];
         if (veh) veh.setLatLng(ll); else veh = L.marker(ll, { icon: vIcon, title: 'Vehicle', zIndexOffset: 1000 }).addTo(m);
-        last = t.driver.at;
+        last = v.at; source = v.source;
         if (!fitted) { fitted = true; const pts = [ll]; if (pick) pts.push(pick.getLatLng()); if (meDot) pts.push(meDot.getLatLng()); pts.length > 1 ? m.fitBounds(pts, { padding: [40, 40], maxZoom: 17 }) : m.setView(ll, 16); }
         else if (follow) m.panTo(ll, { animate: true });
       } else if (!fitted && pick) { m.setView(pick.getLatLng(), 16); }
       renderMeta();
     },
     me(lat, lng, acc) {
+      if (dead) return;
+      if (selfVehicle) {
+        const ll = [lat, lng];
+        selfAt = Date.now(); last = new Date().toISOString(); source = 'you';
+        if (veh) veh.setLatLng(ll); else veh = L.marker(ll, { icon: vIcon, title: 'You (in the vehicle)', zIndexOffset: 1000 }).addTo(m);
+        if (!fitted) { fitted = true; m.setView(ll, 16); } else if (follow) m.panTo(ll, { animate: true });
+        renderMeta(); return;
+      }
       if (meDot) meDot.setLatLng([lat, lng]);
       else meDot = L.circleMarker([lat, lng], { radius: 8, color: '#fff', weight: 3, fillColor: '#1E73E8', fillOpacity: 1 }).addTo(m).bindTooltip('You');
       if (!veh && !pick && !fitted) m.setView([lat, lng], 16);
     },
-    recenter() { follow = true; if (veh) m.setView(veh.getLatLng(), 16); else if (meDot) m.setView(meDot.getLatLng(), 16); }
+    recenter() { if (dead) return; follow = true; if (veh) m.setView(veh.getLatLng(), 16); else if (meDot) m.setView(meDot.getLatLng(), 16); }
   };
   function renderMeta() {
-    if (!metaEl) return;
+    if (!metaEl || dead) return;
     if (!last) { metaEl.innerHTML = `<span>Waiting for the vehicle's GPS…</span><button class="link" type="button">Recenter</button>`; }
     else {
       const stale = Date.now() - new Date(last) > 60000;
-      metaEl.innerHTML = `<span class="${stale ? 'stale' : 'live'}">${stale ? '● GPS not updating' : '● Live'}</span><span>Updated ${agoText(last)}</span><button class="link" type="button">Recenter</button>`;
+      const src = { you: "your phone's GPS", passenger: "passenger's phone", driver: "driver's phone" }[source] || '';
+      metaEl.innerHTML = `<span class="${stale ? 'stale' : 'live'}">${stale ? '● GPS not updating' : '● Live'}</span><span>${src ? src + ' · ' : ''}${agoText(last)}</span><button class="link" type="button">Recenter</button>`;
     }
     metaEl.querySelector('button').onclick = () => api.recenter();
   }
@@ -120,9 +133,11 @@ function liveMap(el, metaEl, { icon = '🛺', showMe = true } = {}) {
   const tick = setInterval(renderMeta, 5000);
   // The passenger's own blue dot, from their phone
   let watch = null;
-  if (showMe && navigator.geolocation) watch = navigator.geolocation.watchPosition(p => api.me(p.coords.latitude, p.coords.longitude, p.coords.accuracy), () => {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
-  setTimeout(() => m.invalidateSize(), 150);
-  const destroy = () => { clearInterval(tick); if (watch != null) navigator.geolocation.clearWatch(watch); m.remove(); };
+  if ((showMe || selfVehicle) && navigator.geolocation) watch = navigator.geolocation.watchPosition(
+    p => { api.me(p.coords.latitude, p.coords.longitude, p.coords.accuracy); if (onFix) onFix(p.coords); },
+    e => { if (onGpsError) onGpsError(e); }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
+  setTimeout(() => { if (!dead) m.invalidateSize(); }, 150);
+  const destroy = () => { if (dead) return; dead = true; clearInterval(tick); if (watch != null) navigator.geolocation.clearWatch(watch); m.stop(); m.remove(); };
   api.destroy = destroy;
   return api;
 }
@@ -333,7 +348,7 @@ function driverCard(r) {
       <dt>Plate</dt><dd>${esc(r.plate)}</dd><dt>Permit</dt><dd>${esc(r.permit_no)}</dd></dl></div>`;
 }
 
-const MAP_BLOCK = '<div id="map" class="map" role="region" aria-label="Live map"></div><div id="mapMeta" class="map-meta"></div>';
+const MAP_BLOCK = '<p id="paxGps" class="notice warn small" hidden></p><div id="map" class="map" role="region" aria-label="Live map"></div><div id="mapMeta" class="map-meta"></div>';
 function renderActive(r) {
   resetView();
   const route = `${esc(r.from_name)} to ${esc(r.to_name)}`;
@@ -382,8 +397,27 @@ function renderActive(r) {
   bindRideActions(r);
   let lm = null;
   if ($('#map')) {
-    lm = liveMap($('#map'), $('#mapMeta'), { icon: VEH_ICON[r.vehicle_type] });
+    const onTrip = r.status === 'started';
+    let fix = null, sentAt = 0;
+    const send = (force) => {
+      if (!fix || (!force && Date.now() - sentAt < 5000)) return;
+      sentAt = Date.now();
+      api(`/rides/${r.id}/location`, { method: 'POST', body: { lat: fix.latitude, lng: fix.longitude } }).catch(() => {});
+    };
+    lm = liveMap($('#map'), $('#mapMeta'), {
+      icon: VEH_ICON[r.vehicle_type], selfVehicle: onTrip,
+      onFix: onTrip ? (c) => { fix = c; send(); } : null,
+      onGpsError: (e) => { const n = $('#paxGps'); if (n) { n.hidden = false; n.textContent = e.code === 1
+        ? "Location is blocked on this phone. Allow location for this site to see exactly where you are. You'll see the driver's GPS until then."
+        : "Can't get your GPS right now. Showing the driver's GPS instead."; } }
+    });
     onReset(() => lm.destroy && lm.destroy());
+    if (onTrip) {
+      // Keep reporting even when stationary, and keep the screen on while the passenger watches
+      const keep = setInterval(() => send(true), 10000);
+      GPS.keepAwake(true);
+      onReset(() => { clearInterval(keep); GPS.keepAwake(false); });
+    }
     api(`/rides/${r.id}/track`).then(t => lm.update(t)).catch(() => {});
   }
   if (['requested', 'accepted', 'arrived', 'started'].includes(r.status)) {

@@ -143,3 +143,7 @@ CREATE TABLE IF NOT EXISTS ride_points (
   at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ride_points_ride_idx ON ride_points(ride_id, id);
+-- Passenger phone is the primary GPS source once the trip starts
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS pax_lat DOUBLE PRECISION;
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS pax_lng DOUBLE PRECISION;
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS pax_loc_at TIMESTAMPTZ;

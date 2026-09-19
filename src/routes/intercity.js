@@ -72,9 +72,9 @@ router.get('/bookings/:id/track', wrap(async (req, res) => {
   let driver = null;
   if (['boarding', 'departed'].includes(b.status)) {
     const d = (await q('SELECT lat, lng, heading, loc_at FROM drivers WHERE user_id=$1', [b.driver_id])).rows[0];
-    if (d && d.lat != null) driver = { lat: d.lat, lng: d.lng, heading: d.heading, at: d.loc_at };
+    if (d && d.lat != null) driver = { lat: d.lat, lng: d.lng, heading: d.heading, at: d.loc_at, source: 'driver' };
   }
-  res.json({ status: b.status, driver, trail: [], pickup: null });
+  res.json({ status: b.status, vehicle: driver, trail: [], pickup: null });
 }));
 
 router.post('/bookings/:id/sos', wrap(async (req, res) => {

@@ -4,7 +4,7 @@ const { q, tx } = require('../lib/db');
 const { auth } = require('../lib/auth');
 const { quote } = require('../lib/fares');
 const { wrap, bad, int, clean, token, HttpError } = require('../lib/util');
-const { coord, rideTrack } = require('../lib/track');
+const { coord, rideTrack, addPoint } = require('../lib/track');
 
 const TYPES = ['keke', 'okada', 'taxi'];
 const ACTIVE = ['requested', 'accepted', 'arrived', 'started'];
@@ -60,6 +60,16 @@ router.get('/history', wrap(async (req, res) => {
 router.get('/:id/track', wrap(async (req, res) => {
   const r = await mine(int(req.params.id), req.user.id);
   res.json(await rideTrack(r));
+}));
+
+// Passenger's phone reports its GPS during the trip (primary tracking source)
+router.post('/:id/location', wrap(async (req, res) => {
+  const c = coord(req.body?.lat, req.body?.lng);
+  if (!c) throw bad('Invalid location.');
+  const r = (await q(`UPDATE rides SET pax_lat=$1, pax_lng=$2, pax_loc_at=now()
+      WHERE id=$3 AND passenger_id=$4 AND status='started' RETURNING id`, [c[0], c[1], int(req.params.id), req.user.id])).rows[0];
+  if (r) await addPoint(r.id, c[0], c[1]);
+  res.json({ ok: !!r });
 }));
 
 router.post('/:id/cancel', wrap(async (req, res) => {
