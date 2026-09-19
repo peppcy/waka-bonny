@@ -4,6 +4,7 @@ const { q, tx } = require('../lib/db');
 const { auth } = require('../lib/auth');
 const { quote } = require('../lib/fares');
 const { wrap, bad, int, clean, token, HttpError } = require('../lib/util');
+const { coord, rideTrack } = require('../lib/track');
 
 const TYPES = ['keke', 'okada', 'taxi'];
 const ACTIVE = ['requested', 'accepted', 'arrived', 'started'];
@@ -32,9 +33,10 @@ router.post('/', wrap(async (req, res) => {
   if (active.rows[0]) throw bad('You already have a ride in progress.');
   const qt = await quote(from, to, type);
   if (qt.fare == null) throw bad('The fare for this route has not been set yet. Try another vehicle type or contact the association.');
-  const r = (await q(`INSERT INTO rides(token, passenger_id, vehicle_type, from_zone, to_zone, pickup_note, dropoff_note, fare, night)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-    [token(), req.user.id, type, from, to, clean(b.pickup_note, 120), clean(b.dropoff_note, 120), qt.fare, qt.night])).rows[0];
+  const pick = coord(b.pickup_lat, b.pickup_lng);
+  const r = (await q(`INSERT INTO rides(token, passenger_id, vehicle_type, from_zone, to_zone, pickup_note, dropoff_note, fare, night, pickup_lat, pickup_lng)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+    [token(), req.user.id, type, from, to, clean(b.pickup_note, 120), clean(b.dropoff_note, 120), qt.fare, qt.night, pick && pick[0], pick && pick[1]])).rows[0];
   res.json({ ride: await mine(r.id, req.user.id) });
 }));
 
@@ -53,6 +55,11 @@ router.get('/active', wrap(async (req, res) => {
 router.get('/history', wrap(async (req, res) => {
   const rows = (await q(`${RIDE_SELECT} WHERE r.passenger_id=$1 ORDER BY r.id DESC LIMIT 20`, [req.user.id])).rows;
   res.json({ rides: rows });
+}));
+
+router.get('/:id/track', wrap(async (req, res) => {
+  const r = await mine(int(req.params.id), req.user.id);
+  res.json(await rideTrack(r));
 }));
 
 router.post('/:id/cancel', wrap(async (req, res) => {

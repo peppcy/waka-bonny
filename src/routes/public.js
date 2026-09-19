@@ -2,6 +2,7 @@ const router = require('express').Router();
 const { q } = require('../lib/db');
 const { quote, getSettings } = require('../lib/fares');
 const { wrap, int, bad, HttpError } = require('../lib/util');
+const { rideTrack } = require('../lib/track');
 
 router.get('/meta', wrap(async (req, res) => {
   const zones = (await q('SELECT id, name FROM zones WHERE active ORDER BY sort, name')).rows;
@@ -21,7 +22,7 @@ router.get('/quote', wrap(async (req, res) => {
 
 // Public trip-share link (no sign-in) — shows only what family needs
 router.get('/share/:token', wrap(async (req, res) => {
-  const r = (await q(`SELECT r.status, r.vehicle_type, r.created_at, r.started_at, r.completed_at,
+  const r = (await q(`SELECT r.id, r.driver_id, r.pickup_lat, r.pickup_lng, r.status, r.vehicle_type, r.created_at, r.started_at, r.completed_at,
       fz.name AS from_name, tz.name AS to_name, r.pickup_note, r.dropoff_note,
       split_part(p.name,' ',1) AS passenger, du.name AS driver_name, d.plate, d.permit_no, d.vehicle_desc
     FROM rides r JOIN zones fz ON fz.id=r.from_zone JOIN zones tz ON tz.id=r.to_zone
@@ -29,7 +30,9 @@ router.get('/share/:token', wrap(async (req, res) => {
     LEFT JOIN users du ON du.id=r.driver_id LEFT JOIN drivers d ON d.user_id=r.driver_id
     WHERE r.token=$1`, [req.params.token])).rows[0];
   if (!r) throw new HttpError(404, 'This trip link is not valid.');
-  res.json(r);
+  const track = await rideTrack(r);
+  delete r.id; delete r.driver_id; delete r.pickup_lat; delete r.pickup_lng;
+  res.json({ ...r, track });
 }));
 
 // Rider/driver badge verification (QR on vehicle)

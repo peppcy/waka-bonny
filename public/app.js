@@ -53,7 +53,7 @@ function sheet(html, wide = false) {
   const f = s.querySelector('input,select,textarea,button'); if (f) f.focus();
   return s;
 }
-function closeSheet() { $('#modal').classList.remove('show'); $('#modal').setAttribute('aria-hidden', 'true'); }
+function closeSheet() { if (S.sheetCleanup) { try { S.sheetCleanup(); } catch {} S.sheetCleanup = null; } $('#modal').classList.remove('show'); $('#modal').setAttribute('aria-hidden', 'true'); }
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeSheet(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 
@@ -66,6 +66,111 @@ async function act(btn, fn) { busy(btn, true); try { await fn(); } catch (e) { f
 const zoneOptions = (sel, placeholder = 'Choose area') =>
   `<option value="">${placeholder}</option>` + S.meta.zones.map(z => `<option value="${z.id}" ${String(z.id) === String(sel) ? 'selected' : ''}>${esc(z.name)}</option>`).join('');
 const saveForm = () => localStorage.setItem('waka_form', JSON.stringify(S.form));
+
+// ---------- view cleanup (maps, GPS watchers, timers) ----------
+S.cleanups = [];
+function resetView() { S.cleanups.forEach(f => { try { f(); } catch {} }); S.cleanups = []; }
+const onReset = (f) => S.cleanups.push(f);
+
+// ---------- live map ----------
+const BONNY = [4.4380, 7.1650];
+const agoText = (t) => { if (!t) return ''; const s = Math.max(0, Math.round((Date.now() - new Date(t)) / 1000)); return s < 60 ? `${s}s ago` : `${Math.round(s / 60)} min ago`; };
+
+// Creates a Leaflet map in `el`. update(track) moves the vehicle, draws the trail and pickup.
+function liveMap(el, metaEl, { icon = '🛺', showMe = true } = {}) {
+  if (!window.L) { el.innerHTML = '<p class="muted small" style="padding:1rem">Map could not load. Check your connection.</p>'; return { update() {}, me() {} }; }
+  const m = L.map(el, { zoomControl: true }).setView(BONNY, 14);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(m);
+  let veh = null, meDot = null, pick = null, line = null, follow = true, fitted = false, last = null;
+  m.on('dragstart zoomstart', (e) => { if (e.originalEvent || e.type === 'dragstart') follow = false; });
+  const vIcon = L.divIcon({ className: '', html: `<div class="vi">${icon}</div>`, iconSize: [38, 38], iconAnchor: [19, 19] });
+  const pIcon = L.divIcon({ className: '', html: '<div class="pin">📍</div>', iconSize: [28, 28], iconAnchor: [14, 28] });
+  const api = {
+    map: m,
+    update(t) {
+      if (!t) return;
+      if (t.pickup && !pick) pick = L.marker([t.pickup.lat, t.pickup.lng], { icon: pIcon, title: 'Pickup' }).addTo(m);
+      if (t.trail && t.trail.length > 1) { if (line) line.setLatLngs(t.trail); else line = L.polyline(t.trail, { color: '#0E4D5C', weight: 5, opacity: .75 }).addTo(m); }
+      if (t.driver) {
+        const ll = [t.driver.lat, t.driver.lng];
+        if (veh) veh.setLatLng(ll); else veh = L.marker(ll, { icon: vIcon, title: 'Vehicle', zIndexOffset: 1000 }).addTo(m);
+        last = t.driver.at;
+        if (!fitted) { fitted = true; const pts = [ll]; if (pick) pts.push(pick.getLatLng()); if (meDot) pts.push(meDot.getLatLng()); pts.length > 1 ? m.fitBounds(pts, { padding: [40, 40], maxZoom: 17 }) : m.setView(ll, 16); }
+        else if (follow) m.panTo(ll, { animate: true });
+      } else if (!fitted && pick) { m.setView(pick.getLatLng(), 16); }
+      renderMeta();
+    },
+    me(lat, lng, acc) {
+      if (meDot) meDot.setLatLng([lat, lng]);
+      else meDot = L.circleMarker([lat, lng], { radius: 8, color: '#fff', weight: 3, fillColor: '#1E73E8', fillOpacity: 1 }).addTo(m).bindTooltip('You');
+      if (!veh && !pick && !fitted) m.setView([lat, lng], 16);
+    },
+    recenter() { follow = true; if (veh) m.setView(veh.getLatLng(), 16); else if (meDot) m.setView(meDot.getLatLng(), 16); }
+  };
+  function renderMeta() {
+    if (!metaEl) return;
+    if (!last) { metaEl.innerHTML = `<span>Waiting for the vehicle's GPS…</span><button class="link" type="button">Recenter</button>`; }
+    else {
+      const stale = Date.now() - new Date(last) > 60000;
+      metaEl.innerHTML = `<span class="${stale ? 'stale' : 'live'}">${stale ? '● GPS not updating' : '● Live'}</span><span>Updated ${agoText(last)}</span><button class="link" type="button">Recenter</button>`;
+    }
+    metaEl.querySelector('button').onclick = () => api.recenter();
+  }
+  renderMeta();
+  const tick = setInterval(renderMeta, 5000);
+  // The passenger's own blue dot, from their phone
+  let watch = null;
+  if (showMe && navigator.geolocation) watch = navigator.geolocation.watchPosition(p => api.me(p.coords.latitude, p.coords.longitude, p.coords.accuracy), () => {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+  setTimeout(() => m.invalidateSize(), 150);
+  const destroy = () => { clearInterval(tick); if (watch != null) navigator.geolocation.clearWatch(watch); m.remove(); };
+  api.destroy = destroy;
+  return api;
+}
+
+// One-off position for the pickup point (resolves null if unavailable)
+function getPos(timeout = 7000) {
+  return new Promise(res => {
+    if (!navigator.geolocation) return res(null);
+    navigator.geolocation.getCurrentPosition(p => res(p.coords), () => res(null), { enableHighAccuracy: true, timeout, maximumAge: 30000 });
+  });
+}
+
+// ---------- driver GPS sender ----------
+// Keeps sending the driver's position while they're online or on a trip. Screen is kept awake during trips.
+const GPS = {
+  watch: null, timer: null, coords: null, sentAt: 0, every: 15000, error: null, wake: null,
+  start(every) {
+    this.every = every;
+    if (!navigator.geolocation) { this.error = 'This phone can\'t share its location.'; this.note(); return; }
+    if (this.watch == null) {
+      this.watch = navigator.geolocation.watchPosition(p => { this.error = null; this.coords = p.coords; this.send(); this.note(); },
+        e => { this.error = e.code === 1 ? 'Location is blocked. Allow location for this site in your browser settings, otherwise passengers can\'t see you on the map.' : 'Can\'t get your GPS position. Check location is switched on.'; this.note(); },
+        { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
+    }
+    clearInterval(this.timer);
+    this.timer = setInterval(() => this.send(true), every);
+  },
+  stop() { if (this.watch != null) navigator.geolocation.clearWatch(this.watch); this.watch = null; clearInterval(this.timer); this.timer = null; this.keepAwake(false); },
+  send(force) {
+    if (!this.coords) return;
+    if (!force && Date.now() - this.sentAt < Math.min(this.every, 4000)) return;
+    this.sentAt = Date.now();
+    const c = this.coords;
+    api('/driver/location', { method: 'POST', body: { lat: c.latitude, lng: c.longitude, heading: c.heading } }).catch(() => {});
+  },
+  async keepAwake(on) {
+    try {
+      if (on && !this.wake && navigator.wakeLock) { this.wake = await navigator.wakeLock.request('screen'); this.wake.addEventListener('release', () => { this.wake = null; }); }
+      if (!on && this.wake) { await this.wake.release(); this.wake = null; }
+    } catch {}
+  },
+  note() {
+    const el = $('#gpsNote'); if (!el) return;
+    el.className = 'notice gps-note ' + (this.error ? 'bad' : '');
+    el.textContent = this.error || (this.coords ? '📡 Sharing your live location with passengers.' : '📡 Getting your GPS position…');
+  }
+};
+document.addEventListener('visibilitychange', () => { if (!document.hidden && GPS.timer && GPS.every <= 5000) GPS.keepAwake(true); });
 
 // ---------- navigation ----------
 function nav(items) {
@@ -80,7 +185,7 @@ function menuFor() {
   return [['ride', 'Ride'], ['intercity', 'Bonny ⇄ PH'], ['trips', 'Trips'], ['account', 'Account']];
 }
 function go(view, push = true) {
-  stopPoll(); closeSheet();
+  stopPoll(); closeSheet(); resetView();
   S.view = view;
   try { sessionStorage.setItem('waka_view', view); } catch {}
   if (push) history.replaceState(null, '', '/');
@@ -98,6 +203,7 @@ function home() {
   go(u.role === 'admin' ? 'admin' : u.role === 'driver' ? 'driver' : 'ride');
 }
 function signOut(msg = true) {
+  GPS.stop();
   S.token = null; S.user = null; localStorage.removeItem('waka_token'); try { sessionStorage.removeItem('waka_view'); } catch {}
   if (msg) toast('Signed out.');
   go('auth');
@@ -193,7 +299,9 @@ function renderRideForm() {
   $('#haveBadge').onclick = () => askBadge();
   $('#request').onclick = (e) => act(e.target, async () => {
     upd();
-    await api('/rides', { method: 'POST', body: { from_zone: f.from, to_zone: f.to, vehicle_type: f.type, pickup_note: f.pickup, dropoff_note: f.dropoff } });
+    const pos = await getPos();
+    await api('/rides', { method: 'POST', body: { from_zone: f.from, to_zone: f.to, vehicle_type: f.type, pickup_note: f.pickup, dropoff_note: f.dropoff,
+      pickup_lat: pos && pos.latitude, pickup_lng: pos && pos.longitude } });
     viewRide();
   });
   loadQuote();
@@ -225,7 +333,9 @@ function driverCard(r) {
       <dt>Plate</dt><dd>${esc(r.plate)}</dd><dt>Permit</dt><dd>${esc(r.permit_no)}</dd></dl></div>`;
 }
 
+const MAP_BLOCK = '<div id="map" class="map" role="region" aria-label="Live map"></div><div id="mapMeta" class="map-meta"></div>';
 function renderActive(r) {
+  resetView();
   const route = `${esc(r.from_name)} to ${esc(r.to_name)}`;
   let html = '';
   if (r.status === 'cancelled') {
@@ -239,6 +349,7 @@ function renderActive(r) {
   } else if (r.status === 'accepted' || r.status === 'arrived') {
     html = `<h2>${r.status === 'arrived' ? `${esc(r.driver_name.split(' ')[0])} has arrived` : `${esc(r.driver_name.split(' ')[0])} is on the way`}</h2>
       ${r.status === 'arrived' ? `<p class="notice">Check the plate matches before you board: <b>${esc(r.plate)}</b></p>` : `<p class="muted">Pickup: ${esc(r.from_name)}${r.pickup_note ? ', ' + esc(r.pickup_note) : ''}</p>`}
+      ${MAP_BLOCK}
       ${driverCard(r)}
       <div class="ticket"><div><small>Fixed fare</small><span class="amt">${naira(r.fare)}</span></div><div style="text-align:right"><small>${route}</small></div></div>
       <div class="row"><a class="btn ghost" href="tel:+${esc(r.driver_phone)}">Call driver</a><button class="btn ghost" data-a="share">Share trip</button></div>
@@ -246,8 +357,9 @@ function renderActive(r) {
   } else if (r.status === 'started') {
     html = `<h2>On the way to ${esc(r.to_name)}</h2>
       <p class="muted">With ${esc(r.driver_name)}, ${esc(r.plate)}. This trip is being recorded.</p>
-      ${driverCard(r)}
-      <div class="row"><button class="btn ghost" data-a="share">Share trip</button><button class="btn danger" data-a="sos">SOS</button></div>`;
+      ${MAP_BLOCK}
+      <div class="row"><button class="btn ghost" data-a="share">Share trip</button><button class="btn danger" data-a="sos">SOS</button></div>
+      ${driverCard(r)}`;
   } else if (r.status === 'completed') {
     let pay = 'cash', stars = 0;
     html = `<h2>You've arrived</h2>
@@ -268,9 +380,19 @@ function renderActive(r) {
   }
   app.innerHTML = html;
   bindRideActions(r);
+  let lm = null;
+  if ($('#map')) {
+    lm = liveMap($('#map'), $('#mapMeta'), { icon: VEH_ICON[r.vehicle_type] });
+    onReset(() => lm.destroy && lm.destroy());
+    api(`/rides/${r.id}/track`).then(t => lm.update(t)).catch(() => {});
+  }
   if (['requested', 'accepted', 'arrived', 'started'].includes(r.status)) {
     const key = r.status;
-    poll(async () => { const { ride } = await api('/rides/active'); if (!ride || ride.status !== key || ride.id !== r.id) viewRide(); });
+    poll(async () => {
+      const { ride } = await api('/rides/active');
+      if (!ride || ride.status !== key || ride.id !== r.id) return viewRide();
+      if (lm) lm.update(await api(`/rides/${r.id}/track`));
+    });
   } else stopPoll();
 }
 
@@ -362,15 +484,22 @@ async function viewShare(tok) {
   const render = async () => {
     const r = await api('/public/share/' + encodeURIComponent(tok), { auth: false });
     const label = { requested: 'Looking for a driver', accepted: 'Driver on the way to pickup', arrived: 'Driver at pickup', started: 'On the trip now', completed: 'Arrived safely', cancelled: 'Trip cancelled' }[r.status];
-    app.innerHTML = `<h1>${esc(r.passenger)}'s trip</h1>
-      <div class="notice ${r.status === 'started' ? 'warn' : ''}"><b>${label}</b>${r.completed_at ? ' at ' + fmtClock(r.completed_at) : r.started_at ? ', started ' + fmtClock(r.started_at) : ''}</div>
+    const head = `<h1>${esc(r.passenger)}'s trip</h1>
+      <div class="notice ${r.status === 'started' ? 'warn' : ''}"><b>${label}</b>${r.completed_at ? ' at ' + fmtClock(r.completed_at) : r.started_at ? ', started ' + fmtClock(r.started_at) : ''}</div>`;
+    if (shareMap) { $('#shareHead').innerHTML = head; shareMap.update(r.track); if (['completed', 'cancelled'].includes(r.status)) stopPoll(); return; }
+    app.innerHTML = `<div id="shareHead">${head}</div>
+      ${MAP_BLOCK}
       <div class="card"><dl class="kv"><dt>From</dt><dd>${esc(r.from_name)}${r.pickup_note ? ', ' + esc(r.pickup_note) : ''}</dd>
         <dt>To</dt><dd>${esc(r.to_name)}${r.dropoff_note ? ', ' + esc(r.dropoff_note) : ''}</dd>
         ${r.driver_name ? `<dt>Driver</dt><dd>${esc(r.driver_name)}</dd><dt>Vehicle</dt><dd>${VEH_ICON[r.vehicle_type]} ${esc(r.vehicle_desc || VEH[r.vehicle_type])}</dd><dt>Plate</dt><dd>${esc(r.plate)}</dd><dt>Permit</dt><dd>${esc(r.permit_no)}</dd>` : ''}</dl></div>
       <p class="muted small">This page updates automatically.</p>`;
+    shareMap = liveMap($('#map'), $('#mapMeta'), { icon: VEH_ICON[r.vehicle_type], showMe: false });
+    onReset(() => shareMap.destroy && shareMap.destroy());
+    shareMap.update(r.track);
     if (['completed', 'cancelled'].includes(r.status)) stopPoll();
   };
-  try { await render(); poll(render, 8000); } catch (e) { app.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+  let shareMap = null;
+  try { await render(); poll(render, 5000); } catch (e) { app.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
 }
 
 // ---------- passenger: Bonny <-> Port Harcourt ----------
@@ -390,7 +519,7 @@ async function viewIntercity() {
       <div class="card"><div class="row" style="align-items:center"><div><h3>${esc(b.origin)} to ${esc(b.destination)}</h3><div class="muted small">${fmtTime(b.depart_at)}, ${VEH[b.vehicle_type]} ${esc(b.plate)}</div></div>
         <span class="tag ${b.departure_status === 'departed' ? 'warn' : ''}" style="flex:0 0 auto">${b.departure_status === 'departed' ? 'On the road' : b.departure_status === 'boarding' ? 'Boarding' : 'Booked'}</span></div>
         <dl class="kv"><dt>Booking ref</dt><dd>${esc(b.ref)}</dd><dt>Seats</dt><dd>${b.seats}</dd><dt>Fare</dt><dd>${naira(b.price * b.seats)}, pay at the park</dd><dt>Driver</dt><dd>${esc(b.driver_name)}, <a href="tel:+${esc(b.driver_phone)}">${esc(localPhone(b.driver_phone))}</a></dd></dl>
-        <div class="row">${b.departure_status === 'departed' ? `<button class="btn danger sm" data-sos="${b.id}">SOS</button>` : `<button class="btn ghost sm" data-cancelb="${b.id}">Cancel booking</button>`}</div></div>`).join('')}</div>` : ''}
+        <div class="row">${['boarding', 'departed'].includes(b.departure_status) ? `<button class="btn sm" data-trackb="${b.id}" data-veh="${b.vehicle_type}">Track vehicle</button>` : ''}${b.departure_status === 'departed' ? `<button class="btn danger sm" data-sos="${b.id}">SOS</button>` : `<button class="btn ghost sm" data-cancelb="${b.id}">Cancel booking</button>`}</div></div>`).join('')}</div>` : ''}
     <h2>Next departures</h2>
     <div class="list">${departures.length ? departures.map(d => `
       <div class="item"><div><b>${fmtTime(d.depart_at)}</b><div class="muted small">${VEH_ICON[d.vehicle_type]} ${VEH[d.vehicle_type]}, ${esc(d.plate)} · ${d.seats_left} of ${d.seats_total} seats left${d.status === 'boarding' ? ' · Boarding now' : ''}</div></div>
@@ -400,7 +529,17 @@ async function viewIntercity() {
   $$('[data-book]').forEach(b => b.onclick = () => bookSheet(departures.find(d => d.id === +b.dataset.book)));
   $$('[data-cancelb]').forEach(b => b.onclick = () => act(b, async () => { await api(`/intercity/bookings/${b.dataset.cancelb}/cancel`, { method: 'POST' }); toast('Booking cancelled.'); viewIntercity(); }));
   $$('[data-sos]').forEach(b => b.onclick = () => sosSheet(`/intercity/bookings/${b.dataset.sos}/sos`));
-  poll(() => viewIntercity(), 30000);
+  $$('[data-trackb]').forEach(b => b.onclick = () => trackBookingSheet(b.dataset.trackb, b.dataset.veh));
+  poll(() => ($('#modal').classList.contains('show') ? Promise.resolve() : viewIntercity()), 30000);
+}
+
+function trackBookingSheet(id, veh) {
+  sheet(`<h3>Where's my ${VEH[veh] ? VEH[veh].toLowerCase() : 'vehicle'}?</h3>${MAP_BLOCK}<button class="btn ghost" id="closeS">Close</button>`, true);
+  const lm = liveMap($('#map'), $('#mapMeta'), { icon: VEH_ICON[veh] || '🚐' });
+  const load = () => api(`/intercity/bookings/${id}/track`).then(t => lm.update(t)).catch(() => {});
+  load(); const timer = setInterval(load, 5000);
+  S.sheetCleanup = () => { clearInterval(timer); lm.destroy && lm.destroy(); };
+  $('#closeS').onclick = closeSheet;
 }
 
 function bookSheet(d) {
@@ -454,6 +593,7 @@ async function viewDriver() {
   const d = user.driver;
   if (!d) { app.innerHTML = '<p>This account has no driver profile.</p>'; return; }
   if (d.status !== 'approved') {
+    GPS.stop();
     const msg = { pending: ['Waiting for verification', 'Visit the association desk with your ID, vehicle papers and permit. Once you are approved you can start taking trips.'],
       rejected: ['Application not approved', 'Contact the association desk to find out why and what to bring.'],
       suspended: ['Account suspended', `You have ${d.strikes} strike(s). Contact the association desk to discuss reinstatement.`] }[d.status];
@@ -468,7 +608,12 @@ async function viewDriver() {
 }
 
 async function viewIslandDriver(d) {
+  resetView();
   const [sum, { ride }] = await Promise.all([api('/driver/summary'), api('/driver/active')]);
+  // GPS: every 4s on a trip (screen kept awake), every 15s while waiting online, off when offline
+  if (ride) { GPS.start(4000); GPS.keepAwake(true); }
+  else if (d.online) { GPS.start(15000); GPS.keepAwake(false); }
+  else GPS.stop();
   let body = '';
   if (ride) {
     const nextBtn = ride.status === 'accepted'
@@ -478,13 +623,18 @@ async function viewIslandDriver(d) {
     body = `<h2>${ride.status === 'started' ? `Heading to ${esc(ride.to_name)}` : `Pick up ${esc(ride.passenger_name.split(' ')[0])} at ${esc(ride.from_name)}`}</h2>
       <div class="card"><dl class="kv"><dt>Passenger</dt><dd>${esc(ride.passenger_name)}</dd><dt>Pickup</dt><dd>${esc(ride.from_name)}${ride.pickup_note ? ', ' + esc(ride.pickup_note) : ''}</dd>
         <dt>Drop-off</dt><dd>${esc(ride.to_name)}${ride.dropoff_note ? ', ' + esc(ride.dropoff_note) : ''}</dd><dt>Fare</dt><dd>${naira(ride.fare)}</dd></dl>
-        <a class="btn ghost" href="tel:+${esc(ride.passenger_phone)}">Call passenger</a></div>${nextBtn}`;
+        <a class="btn ghost" href="tel:+${esc(ride.passenger_phone)}">Call passenger</a>
+        ${ride.pickup_lat != null && ride.status !== 'started' ? `<a class="btn ghost" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${ride.pickup_lat},${ride.pickup_lng}">Navigate to pickup</a>` : ''}</div>
+      ${MAP_BLOCK}
+      <p class="muted small">Keep this screen open during the trip so the passenger can follow you on the map.</p>
+      ${nextBtn}`;
   } else if (d.online) {
     body = `<h2>Ride requests</h2><div id="reqs" class="list"><p class="muted">Looking for requests…</p></div>`;
   } else {
     body = `<p class="muted">Go online to receive ride requests from passengers near you.</p>`;
   }
   app.innerHTML = `
+    ${ride || d.online ? '<div id="gpsNote" class="notice gps-note"></div>' : ''}
     <div class="toggle ${d.online ? 'on' : 'off'}"><span>${d.online ? "You're online" : "You're offline"}</span>
       <button class="switch" role="switch" aria-checked="${d.online}" aria-label="Online" id="onl"></button></div>
     <label class="field"><span class="label">Area you're in now</span><select id="zone">${zoneOptions(d.zone_id)}</select></label>
@@ -494,6 +644,12 @@ async function viewIslandDriver(d) {
   $('#onl').onclick = (e) => act(e.target, async () => { await api('/driver/online', { method: 'POST', body: { online: !d.online, zone_id: $('#zone').value } }); viewDriver(); });
   $('#zone').onchange = () => api('/driver/online', { method: 'POST', body: { online: d.online, zone_id: $('#zone').value } }).then(() => toast('Area updated.')).catch(fail);
   $('#badge').onclick = () => badgeSheet(d);
+  GPS.note();
+  if (ride && $('#map')) {
+    const lm = liveMap($('#map'), null, { icon: VEH_ICON[d.vehicle_type] });
+    onReset(() => lm.destroy && lm.destroy());
+    if (ride.pickup_lat != null && ride.status !== 'started') lm.update({ pickup: { lat: ride.pickup_lat, lng: ride.pickup_lng } });
+  }
   $$('[data-t]').forEach(b => b.onclick = () => act(b, async () => {
     await api(`/driver/rides/${ride.id}/${b.dataset.t}`, { method: 'POST' });
     if (b.dataset.t === 'complete') toast(`Trip complete. Collect ${naira(ride.fare)}.`);
@@ -532,11 +688,15 @@ function badgeSheet(d) {
 
 // ---------- bus / Sienna operator ----------
 async function viewOperator(d) {
+  resetView();
   const [{ routes }, { departures }] = await Promise.all([api('/intercity/routes'), api('/intercity/departures/mine')]);
+  const onRoad = departures.some(x => ['boarding', 'departed'].includes(x.status));
+  if (onRoad) { GPS.start(5000); GPS.keepAwake(true); } else GPS.stop();
   const cap = d.vehicle_type === 'bus' ? 18 : 7;
   const s = S.meta.settings;
   app.innerHTML = `
     <h1>${VEH_ICON[d.vehicle_type]} Your departures</h1>
+    ${onRoad ? '<div id="gpsNote" class="notice gps-note"></div><p class="muted small">Keep this screen open while driving so booked passengers can track the vehicle.</p>' : ''}
     <form id="newDep" class="card"><h3>Add a departure</h3>
       <label class="field"><span class="label">Route</span><select name="route_id" required>${routes.map(r => `<option value="${r.id}">${esc(r.origin)} to ${esc(r.destination)} (${naira(d.vehicle_type === 'bus' ? r.price_bus : r.price_sienna)})</option>`).join('')}</select></label>
       <div class="row"><label class="field"><span class="label">Departure time</span><input name="depart_at" type="datetime-local" required></label>
@@ -563,7 +723,8 @@ async function viewOperator(d) {
     act(b, async () => { await api(`/intercity/departures/${b.dataset.id}/status`, { method: 'POST', body: { status: b.dataset.st } }); viewDriver(); });
   });
   $$('[data-man]').forEach(b => b.onclick = () => manifestSheet(+b.dataset.man));
-  poll(() => viewDriver(), 20000);
+  GPS.note();
+  poll(() => ($('#modal').classList.contains('show') ? Promise.resolve() : viewDriver()), 20000);
 }
 
 async function manifestSheet(id) {

@@ -3,11 +3,28 @@ const router = require('express').Router();
 const { q } = require('../lib/db');
 const { auth, driver } = require('../lib/auth');
 const { wrap, bad, int, HttpError } = require('../lib/util');
+const { coord } = require('../lib/track');
 
 const ISLAND = ['keke', 'okada', 'taxi'];
 router.use(auth('driver'));
 
 router.get('/status', driver({ allowPending: true }), wrap(async (req, res) => res.json({ driver: req.driver })));
+
+// GPS from the driver's phone. Keke/okada/taxi and bus/Sienna drivers all report here.
+router.post('/location', driver(), wrap(async (req, res) => {
+  const c = coord(req.body?.lat, req.body?.lng);
+  if (!c) throw bad('Invalid location.');
+  const heading = Number.isFinite(Number(req.body?.heading)) ? Number(req.body.heading) : null;
+  await q('UPDATE drivers SET lat=$1, lng=$2, heading=$3, loc_at=now(), last_seen=now() WHERE user_id=$4', [c[0], c[1], heading, req.user.id]);
+  const ride = (await q(`SELECT id FROM rides WHERE driver_id=$1 AND status='started' ORDER BY id DESC LIMIT 1`, [req.user.id])).rows[0];
+  if (ride) {
+    // Skip near-duplicate points (under ~8 m) so a parked vehicle doesn't flood the trail
+    const last = (await q('SELECT lat, lng FROM ride_points WHERE ride_id=$1 ORDER BY id DESC LIMIT 1', [ride.id])).rows[0];
+    const moved = !last || Math.hypot((last.lat - c[0]) * 111320, (last.lng - c[1]) * 111320 * Math.cos(c[0] * Math.PI / 180)) > 8;
+    if (moved) await q('INSERT INTO ride_points(ride_id, lat, lng) VALUES($1,$2,$3)', [ride.id, c[0], c[1]]);
+  }
+  res.json({ ok: true });
+}));
 
 router.use(driver({ types: ISLAND }));
 

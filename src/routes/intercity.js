@@ -65,6 +65,18 @@ router.post('/bookings/:id/cancel', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+router.get('/bookings/:id/track', wrap(async (req, res) => {
+  const b = (await q(`SELECT dp.status, dp.driver_id FROM bookings b JOIN departures dp ON dp.id=b.departure_id
+      WHERE b.id=$1 AND b.passenger_id=$2`, [int(req.params.id), req.user.id])).rows[0];
+  if (!b) throw new HttpError(404, 'Booking not found.');
+  let driver = null;
+  if (['boarding', 'departed'].includes(b.status)) {
+    const d = (await q('SELECT lat, lng, heading, loc_at FROM drivers WHERE user_id=$1', [b.driver_id])).rows[0];
+    if (d && d.lat != null) driver = { lat: d.lat, lng: d.lng, heading: d.heading, at: d.loc_at };
+  }
+  res.json({ status: b.status, driver, trail: [], pickup: null });
+}));
+
 router.post('/bookings/:id/sos', wrap(async (req, res) => {
   const b = (await q(`SELECT id FROM bookings WHERE id=$1 AND passenger_id=$2`, [int(req.params.id), req.user.id])).rows[0];
   if (!b) throw new HttpError(404, 'Booking not found.');
