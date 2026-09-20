@@ -4,7 +4,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { q, tx } = require('../lib/db');
-const { sign, auth } = require('../lib/auth');
+const { sign, auth, bannedError } = require('../lib/auth');
 const { sendSms, provider } = require('../lib/sms');
 const { normalizePhone, code, bad, wrap, clean, HttpError } = require('../lib/util');
 
@@ -16,6 +16,7 @@ const otpLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 12, standardHead
 const DRIVER_TYPES = ['keke', 'okada', 'taxi', 'bus', 'sienna'];
 const OTP_TTL_MIN = 10, OTP_MAX_ATTEMPTS = 5;
 const hashCode = (phone, c) => crypto.createHmac('sha256', process.env.JWT_SECRET).update(`${phone}:${c}`).digest('hex');
+const phoneHash = (phone) => crypto.createHmac('sha256', process.env.JWT_SECRET).update('blocked:' + phone).digest('hex');
 const devMode = () => provider() === 'console' && process.env.NODE_ENV !== 'production';
 
 async function profile(userId) {
@@ -30,7 +31,10 @@ router.post('/otp/request', otpLimiter, wrap(async (req, res) => {
   const phone = normalizePhone(req.body?.phone);
   const purpose = req.body?.purpose === 'reset' ? 'reset' : 'register';
   if (!phone) throw bad('Enter a valid Nigerian phone number, for example 0803 123 4567.');
-  const exists = (await q('SELECT 1 FROM users WHERE phone=$1', [phone])).rows[0];
+  if (purpose === 'register' && (await q('SELECT 1 FROM blocked_phones WHERE phone_hash=$1', [phoneHash(phone)])).rows[0])
+    throw bad('This phone number cannot be used to create an account. Contact the Waka Bonny team.');
+  const exists = (await q('SELECT banned_at, ban_reason FROM users WHERE phone=$1', [phone])).rows[0];
+  if (exists && exists.banned_at) throw bannedError(exists.ban_reason);
   if (purpose === 'register' && exists) throw bad('This number already has an account. Sign in, or use "Forgot PIN".');
   if (purpose === 'reset' && !exists) throw bad('No account uses this number. Create an account instead.');
   const recent = (await q(`SELECT created_at FROM otps WHERE phone=$1 AND purpose=$2 ORDER BY id DESC LIMIT 1`, [phone, purpose])).rows[0];
@@ -114,8 +118,9 @@ router.post('/reset-pin', limiter, wrap(async (req, res) => {
 router.post('/login', limiter, wrap(async (req, res) => {
   const phone = normalizePhone(req.body?.phone);
   const pin = String(req.body?.pin || '');
-  const u = phone && (await q('SELECT id, pin_hash FROM users WHERE phone=$1', [phone])).rows[0];
+  const u = phone && (await q('SELECT id, pin_hash, banned_at, ban_reason FROM users WHERE phone=$1 AND deleted_at IS NULL', [phone])).rows[0];
   if (!u || !(await bcrypt.compare(pin, u.pin_hash))) throw new HttpError(401, 'Phone number or PIN is incorrect.');
+  if (u.banned_at) throw bannedError(u.ban_reason);
   res.json({ token: sign(u), user: await profile(u.id) });
 }));
 
@@ -141,3 +146,4 @@ router.post('/change-pin', auth(), limiter, wrap(async (req, res) => {
 
 module.exports = router;
 module.exports.profile = profile;
+module.exports.phoneHash = phoneHash;

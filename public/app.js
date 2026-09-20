@@ -36,6 +36,7 @@ async function api(path, { method = 'GET', body, auth = true } = {}) {
   }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && auth && S.token) { signOut(false); throw new Error(data.error || 'Sign in again.'); }
+  if (res.status === 403 && data.banned) { if (S.token) signOut(false); S.bannedMsg = data.error; if (S.view === 'auth') viewAuth(); throw new Error(data.error); }
   if (!res.ok) throw new Error(data.error || 'Request failed.');
   return data;
 }
@@ -77,8 +78,6 @@ const BONNY = [4.4380, 7.1650];
 const agoText = (t) => { if (!t) return ''; const s = Math.max(0, Math.round((Date.now() - new Date(t)) / 1000)); return s < 60 ? `${s}s ago` : `${Math.round(s / 60)} min ago`; };
 
 // Creates a Leaflet map in `el`. update(track) moves the vehicle, draws the trail and pickup.
-// Bonny Island area; island maps can't be dragged far away from it
-const BONNY_BOUNDS = [[4.30, 7.02], [4.58, 7.36]];
 
 // Base maps. Satellite (Esri World Imagery, no key needed) shows Bonny's buildings and roads far better than
 // OpenStreetMap, which has little street data for the island. The choice is remembered on the phone.
@@ -94,13 +93,10 @@ function baseLayers() {
 }
 
 // selfVehicle: this phone is inside the vehicle (passenger during the trip), so its own GPS moves the vehicle icon.
-// island: keep the map on Bonny Island (off for Port Harcourt trips).
-function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false, onFix = null, onGpsError = null, island = true } = {}) {
+function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false, onFix = null, onGpsError = null } = {}) {
   if (!window.L) { el.innerHTML = '<p class="muted small" style="padding:1rem">Map could not load. Check your connection.</p>'; return { update() {}, me() {}, destroy() {} }; }
-  const m = L.map(el, {
-    zoomControl: true, minZoom: island ? 12 : 8, maxZoom: 20, zoomSnap: 0.5, tap: true,
-    maxBounds: island ? BONNY_BOUNDS : null, maxBoundsViscosity: island ? 0.8 : 0
-  }).setView(BONNY, 14);
+  // World map: users anywhere (Bonny, Port Harcourt, Lagos, abroad) see their real position.
+  const m = L.map(el, { zoomControl: true, minZoom: 2, maxZoom: 20, zoomSnap: 0.5, tap: true, worldCopyJump: true }).setView(BONNY, 14);
   el._wakaMap = m;
   const layers = baseLayers();
   let saved = null; try { saved = localStorage.getItem('waka_map'); } catch {}
@@ -108,7 +104,7 @@ function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false
   L.control.layers(layers, null, { position: 'topright', collapsed: true }).addTo(m);
   m.on('baselayerchange', (e) => { try { localStorage.setItem('waka_map', e.name); } catch {} });
 
-  let veh = null, meDot = null, pick = null, line = null, last = null, source = null, selfAt = 0, dead = false;
+  let veh = null, meDot = null, accCircle = null, pick = null, line = null, last = null, source = null, selfAt = 0, dead = false;
   let centred = false;      // the map centres itself once, then never changes the user's zoom
   let follow = true;        // follow the vehicle (panning only, zoom untouched) until the user drags away
   let touchAt = 0;          // don't move the map while the user's fingers are on it
@@ -146,7 +142,7 @@ function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false
       centreOnce();
       renderMeta();
     },
-    me(lat, lng) {
+    me(lat, lng, acc) {
       if (dead) return;
       const ll = [lat, lng];
       if (selfVehicle) {
@@ -154,8 +150,10 @@ function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false
         if (veh) veh.setLatLng(ll); else veh = L.marker(ll, { icon: vIcon, title: 'You (in the vehicle)', zIndexOffset: 1000 }).addTo(m);
         centreOnce(); followTo(ll); renderMeta(); return;
       }
+      // Pale circle = GPS accuracy (the phone is somewhere inside it); blue dot = best estimate
+      if (acc != null && acc < 5000) { if (accCircle) accCircle.setLatLng(ll).setRadius(acc); else accCircle = L.circle(ll, { radius: acc, color: '#1E73E8', weight: 1, fillColor: '#1E73E8', fillOpacity: .12, interactive: false }).addTo(m); }
       if (meDot) meDot.setLatLng(ll);
-      else meDot = L.circleMarker(ll, { radius: 8, color: '#fff', weight: 3, fillColor: '#1E73E8', fillOpacity: 1 }).addTo(m).bindTooltip('You');
+      else meDot = L.circleMarker(ll, { radius: 8, color: '#fff', weight: 3, fillColor: '#1E73E8', fillOpacity: 1 }).addTo(m).bindTooltip('You are here');
       centreOnce();
     },
     recenter() {
@@ -194,7 +192,7 @@ function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false
 
   let watch = null;
   if ((showMe || selfVehicle) && navigator.geolocation) watch = navigator.geolocation.watchPosition(
-    p => { api.me(p.coords.latitude, p.coords.longitude); if (onFix) onFix(p.coords); },
+    p => { api.me(p.coords.latitude, p.coords.longitude, p.coords.accuracy); if (onFix) onFix(p.coords); },
     e => { if (onGpsError) onGpsError(e); }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
   setTimeout(() => { if (!dead) m.invalidateSize(); }, 150);
   api.destroy = () => { if (dead) return; dead = true; if (full) setFull(false); clearInterval(tick); if (watch != null) navigator.geolocation.clearWatch(watch); m.stop(); m.remove(); };
@@ -343,6 +341,7 @@ async function viewAuth() {
       <button data-m="login" aria-pressed="${A.mode === 'login'}">Sign in</button>
       <button data-m="register" aria-pressed="${A.mode !== 'login'}">Create account</button>
     </div>
+    ${S.bannedMsg ? `<div class="notice bad">${esc(S.bannedMsg)}</div>` : ''}
     <form id="authForm" class="card" novalidate><h2>${title}</h2>${body}</form>`;
   const reset = (mode) => { S.auth = { mode, step: 'phone', role: A.role }; viewAuth(); };
   $$('[data-m]').forEach(b => b.onclick = () => reset(b.dataset.m));
@@ -355,7 +354,7 @@ async function viewAuth() {
   if ($('#resend')) $('#resend').onclick = (e) => act(e.target, sendCode);
   if ($('#changeNo')) $('#changeNo').onclick = () => { A.step = 'phone'; viewAuth(); };
   const signedIn = (out, msg) => {
-    S.token = out.token; S.user = out.user; localStorage.setItem('waka_token', out.token); S.auth = null;
+    S.token = out.token; S.user = out.user; localStorage.setItem('waka_token', out.token); S.auth = null; S.bannedMsg = null;
     toast(msg); afterSignIn();
   };
   $('#authForm').onsubmit = (e) => {
@@ -796,7 +795,7 @@ async function viewIntercity() {
 
 function trackBookingSheet(id, veh) {
   sheet(`<h3>Where's my ${VEH[veh] ? VEH[veh].toLowerCase() : 'vehicle'}?</h3>${MAP_BLOCK}<button class="btn ghost" id="closeS">Close</button>`, true);
-  const lm = liveMap($('#map'), $('#mapMeta'), { icon: VEH_ICON[veh] || '🚐', island: false });
+  const lm = liveMap($('#map'), $('#mapMeta'), { icon: VEH_ICON[veh] || '🚐' });
   const load = () => api(`/intercity/bookings/${id}/track`).then(t => lm.update(t)).catch(() => {});
   load(); const timer = setInterval(load, 5000);
   S.sheetCleanup = () => { clearInterval(timer); lm.destroy && lm.destroy(); };
@@ -938,7 +937,8 @@ async function viewIslandDriver(d) {
     body = `<h2>Requests</h2><div id="reqs" class="list"><p class="muted">Looking for requests…</p></div>
       <div id="map" class="map map-sm" role="region" aria-label="Your location"></div><div id="mapMeta" class="map-meta"></div>`;
   } else {
-    body = `<p class="muted">Go online to receive ride, parcel and errand requests near you.</p>`;
+    body = `<p class="muted">Go online to receive ride, parcel and errand requests near you.</p>
+      <div id="map" class="map map-sm" role="region" aria-label="Your location"></div><div id="mapMeta" class="map-meta"></div>`;
   }
   app.innerHTML = `
     ${ride || d.online ? '<div id="gpsNote" class="notice gps-note"></div>' : ''}
@@ -1082,12 +1082,12 @@ async function manifestSheet(id) {
 }
 
 // ---------- admin desk ----------
-const ADMIN_TABS = [['overview', 'Overview'], ['drivers', 'Drivers'], ['fares', 'Fares & areas'], ['intercity', 'Bonny ⇄ PH'], ['payments', 'Payments'], ['safety', 'Safety'], ['settings', 'Settings']];
+const ADMIN_TABS = [['overview', 'Overview'], ['users', 'Users'], ['drivers', 'Drivers'], ['fares', 'Fares & areas'], ['intercity', 'Bonny ⇄ PH'], ['payments', 'Payments'], ['safety', 'Safety'], ['settings', 'Settings']];
 async function viewAdmin() {
   S.adminTab = S.adminTab || 'overview';
   app.innerHTML = `<div class="seg" role="tablist" style="overflow-x:auto">${ADMIN_TABS.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-pressed="${S.adminTab === k}">${l}</button>`).join('')}</div><div id="tab" class="list"></div>`;
   $$('[data-tab]').forEach(b => b.onclick = () => { S.adminTab = b.dataset.tab; stopPoll(); viewAdmin().catch(fail); });
-  const T = { overview: adOverview, drivers: adDrivers, fares: adFares, intercity: adIntercity, payments: adPayments, safety: adSafety, settings: adSettings };
+  const T = { overview: adOverview, users: adUsers, drivers: adDrivers, fares: adFares, intercity: adIntercity, payments: adPayments, safety: adSafety, settings: adSettings };
   await T[S.adminTab]($('#tab'));
 }
 
@@ -1193,6 +1193,82 @@ async function adIntercity(el) {
     await api(`/admin/routes/${f.dataset.route}`, { method: 'PUT', body: Object.fromEntries(new FormData(f)) }); toast('Route saved.');
   }); });
   $$('[data-man]', el).forEach(b => b.onclick = () => manifestSheet(+b.dataset.man).catch(fail));
+}
+
+async function adUsers(el) {
+  const F = S.userFilter = S.userFilter || { q: '', role: '', status: '' };
+  const qs = new URLSearchParams(Object.entries(F).filter(([, v]) => v)).toString();
+  const { users, counts } = await api('/admin/users' + (qs ? '?' + qs : ''));
+  el.innerHTML = `
+    <div class="stats"><div class="stat"><b>${counts.passengers}</b><span>Customers</span></div><div class="stat"><b>${counts.drivers}</b><span>Drivers</span></div><div class="stat"><b>${counts.banned}</b><span>Banned</span></div></div>
+    <form id="uf" class="row" style="flex-wrap:wrap;align-items:end">
+      <label class="field" style="flex:2 1 220px"><span class="label">Search name or phone</span><input name="q" value="${esc(F.q)}" placeholder="e.g. Mina or 0803…"></label>
+      <label class="field" style="flex:1 1 140px"><span class="label">Type</span><select name="role">${[['', 'Everyone'], ['passenger', 'Customers'], ['driver', 'Drivers'], ['admin', 'Admins']].map(([v, l]) => `<option value="${v}" ${F.role === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="field" style="flex:1 1 140px"><span class="label">Status</span><select name="status">${[['', 'Any'], ['active', 'Active'], ['banned', 'Banned']].map(([v, l]) => `<option value="${v}" ${F.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <button class="btn" style="flex:0 0 auto;width:auto" type="submit">Search</button></form>
+    <div class="table-wrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Type</th><th>Activity</th><th>Joined</th><th>Status</th><th></th></tr></thead><tbody>
+    ${users.map(u => `<tr><td><b>${esc(u.name)}</b>${u.phone_verified ? ' <span title="Phone verified by SMS">✔</span>' : ''}</td><td><a href="tel:+${esc(u.phone)}">${esc(localPhone(u.phone))}</a></td>
+      <td>${u.role === 'driver' ? `${VEH_ICON[u.vehicle_type] || ''} Driver${u.plate ? '<br><span class="muted small">' + esc(u.plate) + '</span>' : ''}` : u.role === 'admin' ? 'Admin' : 'Customer'}</td>
+      <td class="small">${u.booked ? u.booked + ' booked' : ''}${u.driven ? (u.booked ? '<br>' : '') + u.driven + ' driven' : ''}${u.complaints ? `<br><span class="tag warn">${u.complaints} complaint(s)</span>` : ''}${!u.booked && !u.driven ? '<span class="muted">none</span>' : ''}
+        ${u.last_seen_at ? `<br><span class="muted">seen ${fmtTime(u.last_seen_at)}</span>` : ''}</td>
+      <td class="small">${fmtTime(u.created_at)}</td>
+      <td>${u.banned_at ? '<span class="tag bad">Banned</span>' : '<span class="tag ok">Active</span>'}</td>
+      <td><button class="btn ghost sm" data-u="${u.id}">Open</button></td></tr>`).join('') || '<tr><td colspan="7" class="muted">No users match.</td></tr>'}
+    </tbody></table></div>
+    ${users.length === 200 ? '<p class="muted small">Showing the newest 200. Search to find others.</p>' : ''}`;
+  $('#uf').onsubmit = (e) => { e.preventDefault(); S.userFilter = Object.fromEntries(new FormData(e.target)); adUsers(el).catch(fail); };
+  $$('[data-u]', el).forEach(b => b.onclick = () => userSheet(+b.dataset.u, () => adUsers(el).catch(fail)));
+}
+
+async function userSheet(id, refresh) {
+  const { user: u, rides, complaints, actions, paid } = await api('/admin/users/' + id);
+  const isAdmin = u.role === 'admin' || u.id === S.user.id;
+  sheet(`<h3>${esc(u.name)} ${u.banned_at ? '<span class="tag bad">Banned</span>' : ''}</h3>
+    <dl class="kv"><dt>Phone</dt><dd><a href="tel:+${esc(u.phone)}">${esc(localPhone(u.phone))}</a>${u.phone_verified ? ' ✔ verified' : ''}</dd>
+      <dt>Account</dt><dd>${u.role === 'driver' ? `Driver, ${VEH[u.vehicle_type] || ''} ${esc(u.plate || '')} (${esc(u.driver_status)}, ${u.strikes} strikes)` : esc(u.role === 'passenger' ? 'Customer' : u.role)}</dd>
+      <dt>Joined</dt><dd>${fmtTime(u.created_at)}</dd>${u.last_seen_at ? `<dt>Last active</dt><dd>${fmtTime(u.last_seen_at)}</dd>` : ''}
+      ${u.emergency_phone ? `<dt>Emergency contact</dt><dd>${esc(localPhone(u.emergency_phone))}</dd>` : ''}
+      <dt>Paid online</dt><dd>${naira(paid)}</dd>
+      ${u.banned_at ? `<dt>Banned</dt><dd>${fmtTime(u.banned_at)}: ${esc(u.ban_reason)}</dd>` : ''}</dl>
+    ${complaints.length ? `<h3>Complaints</h3><div class="list">${complaints.map(c => `<div class="item small"><span>${esc(c.text)}<br><span class="muted">${esc(c.kind)} · ${fmtTime(c.created_at)} · ${esc(c.status)}</span></span></div>`).join('')}</div>` : ''}
+    <h3>Recent trips</h3>
+    <div class="list">${rides.map(r => `<div class="item small"><span>${SERVICE[r.service || 'ride'].icon} ${esc(r.from_name)} to ${esc(r.to_name)}<br><span class="muted">${fmtTime(r.created_at)} · ${esc(r.as_role)} · ${esc(r.status)}</span></span><b>${naira(r.fare)}</b></div>`).join('') || '<p class="muted small">No trips.</p>'}</div>
+    ${actions.length ? `<h3>Moderation history</h3><div class="list">${actions.map(a => `<div class="item small"><span><b>${esc(a.action)}</b>${a.reason ? ': ' + esc(a.reason) : ''}<br><span class="muted">by ${esc(a.admin_name)}, ${fmtTime(a.created_at)}</span></span></div>`).join('')}</div>` : ''}
+    ${isAdmin ? '<p class="muted small">Admin accounts cannot be banned or deleted here.</p>' : `
+    <div id="modBox" class="card">
+      <h3>Take action</h3>
+      <label class="field"><span class="label">Reason (the user sees this if banned)</span><input id="modReason" maxlength="300" placeholder="e.g. Harassed a driver on 12 Sept"></label>
+      <div class="row" style="flex-wrap:wrap">
+        ${u.banned_at ? '<button class="btn sm" id="unban">Unban</button>' : '<button class="btn danger sm" id="ban">Ban user</button>'}
+        <button class="btn ghost sm" id="delStart">Delete account…</button>
+      </div>
+      <div id="delBox" hidden class="list">
+        <p class="notice bad small">Permanent. Their name, phone, PIN, emergency contact, saved places and GPS history are erased. Trip and payment records stay, anonymised, for your accounts. Pending trips and unpaid bookings are cancelled.</p>
+        <label class="small"><input type="checkbox" id="blockNo" checked style="width:auto;min-height:0"> Also block this phone number from creating a new account</label>
+        <label class="field"><span class="label">Type DELETE to confirm</span><input id="delConfirm" autocomplete="off"></label>
+        <button class="btn danger" id="delGo">Delete permanently</button>
+      </div>
+    </div>`}
+    <button class="btn ghost" id="closeS">Close</button>`, true);
+  $('#closeS').onclick = closeSheet;
+  if (isAdmin) return;
+  const reason = () => $('#modReason').value.trim();
+  if ($('#ban')) $('#ban').onclick = (e) => act(e.target, async () => {
+    if (!reason()) throw new Error('Enter a reason for the ban.');
+    await api(`/admin/users/${u.id}/ban`, { method: 'POST', body: { reason: reason() } });
+    toast(`${u.name} is banned and signed out.`); closeSheet(); refresh();
+  });
+  if ($('#unban')) $('#unban').onclick = (e) => act(e.target, async () => {
+    await api(`/admin/users/${u.id}/unban`, { method: 'POST', body: { reason: reason() } });
+    toast(`${u.name} can use the app again.`); closeSheet(); refresh();
+  });
+  $('#delStart').onclick = () => { $('#delBox').hidden = false; $('#delConfirm').focus(); };
+  $('#delGo').onclick = (e) => act(e.target, async () => {
+    if (!reason()) throw new Error('Enter a reason for deleting this account.');
+    const out = await api(`/admin/users/${u.id}/delete`, { method: 'POST', body: { reason: reason(), confirm: $('#delConfirm').value, block_phone: $('#blockNo').checked } });
+    toast('Account deleted.' + (out.paidSeats ? ` Note: ${out.paidSeats} paid seat booking(s) may need a refund.` : '') + (out.subCancelFailed ? ' Cancel their Paystack subscription manually.' : ''));
+    closeSheet(); refresh();
+  });
 }
 
 async function adPayments(el) {

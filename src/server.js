@@ -24,6 +24,7 @@ app.use('/api/public', require('./routes/public'));
 app.use('/api/rides', require('./routes/rides'));
 app.use('/api/driver', require('./routes/driver'));
 app.use('/api/intercity', require('./routes/intercity'));
+app.use('/api/admin/users', require('./routes/users-admin'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/pay', require('./routes/pay'));
 
@@ -38,7 +39,7 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 
 app.use((err, req, res, next) => {
-  if (err.status) return res.status(err.status).json({ error: err.message });
+  if (err.status) return res.status(err.status).json({ error: err.message, ...(err.banned ? { banned: true } : {}) });
   console.error(err);
   res.status(500).json({ error: 'Something went wrong on our side. Try again.' });
 });

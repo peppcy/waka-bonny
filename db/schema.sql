@@ -200,3 +200,22 @@ ALTER TABLE drivers ADD COLUMN IF NOT EXISTS sub_paid_until TIMESTAMPTZ;
 ALTER TABLE drivers ADD COLUMN IF NOT EXISTS sub_code TEXT;
 ALTER TABLE drivers ADD COLUMN IF NOT EXISTS sub_email_token TEXT;
 ALTER TABLE drivers ADD COLUMN IF NOT EXISTS sub_auto BOOLEAN NOT NULL DEFAULT false;
+
+-- ===== Platform owner: ban / delete users =====
+ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_reason TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS blocked_phones (
+  phone_hash TEXT PRIMARY KEY,
+  reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS admin_actions (
+  id SERIAL PRIMARY KEY,
+  admin_id INT NOT NULL REFERENCES users(id),
+  user_id INT NOT NULL REFERENCES users(id),
+  action TEXT NOT NULL,
+  reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
