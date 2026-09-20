@@ -13,7 +13,7 @@ function coord(lat, lng) {
   return [a, b];
 }
 
-const paxFresh = (ride) => ride.status === 'started' && ride.pax_loc_at && Date.now() - new Date(ride.pax_loc_at) < PAX_FRESH_MS;
+const paxFresh = (ride) => (ride.service || 'ride') === 'ride' && ride.status === 'started' && ride.pax_loc_at && Date.now() - new Date(ride.pax_loc_at) < PAX_FRESH_MS;
 
 // Adds a trail point unless it's within ~8 m of the last one
 async function addPoint(rideId, lat, lng) {
@@ -31,7 +31,7 @@ async function rideTrack(ride) {
       const d = (await q('SELECT lat, lng, heading, loc_at FROM drivers WHERE user_id=$1', [ride.driver_id])).rows[0];
       if (d && d.lat != null) vehicle = { lat: d.lat, lng: d.lng, heading: d.heading, at: d.loc_at, source: 'driver' };
       // Passenger's last fix may still be newer than a stale driver fix
-      if (ride.status === 'started' && ride.pax_loc_at && (!vehicle || new Date(ride.pax_loc_at) > new Date(vehicle.at)))
+      if ((ride.service || 'ride') === 'ride' && ride.status === 'started' && ride.pax_loc_at && (!vehicle || new Date(ride.pax_loc_at) > new Date(vehicle.at)))
         vehicle = { lat: ride.pax_lat, lng: ride.pax_lng, at: ride.pax_loc_at, source: 'passenger' };
     }
   }

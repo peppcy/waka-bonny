@@ -10,6 +10,7 @@ router.get('/meta', wrap(async (req, res) => {
   res.json({ zones, settings: {
     night_start_hour: s.night_start_hour, night_end_hour: s.night_end_hour, night_surcharge: s.night_surcharge,
     intercity_open_hour: s.intercity_open_hour, intercity_close_hour: s.intercity_close_hour,
+    parcel_fee: s.parcel_fee, errand_fee: s.errand_fee, online_payments: !!process.env.PAYSTACK_SECRET_KEY,
     safety_desk_phone: s.safety_desk_phone
   }});
 }));
@@ -17,12 +18,13 @@ router.get('/meta', wrap(async (req, res) => {
 router.get('/quote', wrap(async (req, res) => {
   const from = int(req.query.from), to = int(req.query.to), type = req.query.type;
   if (!from || !to || !['keke', 'okada', 'taxi'].includes(type)) throw bad('Choose pickup, destination and vehicle.');
-  res.json(await quote(from, to, type));
+  const service = ['parcel', 'errand'].includes(req.query.service) ? req.query.service : 'ride';
+  res.json(await quote(from, to, type, service));
 }));
 
 // Public trip-share link (no sign-in) — shows only what family needs
 router.get('/share/:token', wrap(async (req, res) => {
-  const r = (await q(`SELECT r.id, r.driver_id, r.pickup_lat, r.pickup_lng, r.pax_lat, r.pax_lng, r.pax_loc_at, r.status, r.vehicle_type, r.created_at, r.started_at, r.completed_at,
+  const r = (await q(`SELECT r.id, r.driver_id, r.service, r.pickup_lat, r.pickup_lng, r.pax_lat, r.pax_lng, r.pax_loc_at, r.status, r.vehicle_type, r.created_at, r.started_at, r.completed_at,
       fz.name AS from_name, tz.name AS to_name, r.pickup_note, r.dropoff_note,
       split_part(p.name,' ',1) AS passenger, du.name AS driver_name, d.plate, d.permit_no, d.vehicle_desc
     FROM rides r JOIN zones fz ON fz.id=r.from_zone JOIN zones tz ON tz.id=r.to_zone

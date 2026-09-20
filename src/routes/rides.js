@@ -3,7 +3,9 @@ const router = require('express').Router();
 const { q, tx } = require('../lib/db');
 const { auth } = require('../lib/auth');
 const { quote } = require('../lib/fares');
-const { wrap, bad, int, clean, token, HttpError } = require('../lib/util');
+const { sendSms } = require('../lib/sms');
+const crypto = require('crypto');
+const { wrap, bad, int, clean, token, normalizePhone, HttpError } = require('../lib/util');
 const { coord, rideTrack, addPoint } = require('../lib/track');
 
 const TYPES = ['keke', 'okada', 'taxi'];
@@ -26,17 +28,39 @@ async function mine(id, userId) {
 
 router.post('/', wrap(async (req, res) => {
   const b = req.body || {};
+  const service = ['parcel', 'errand'].includes(b.service) ? b.service : 'ride';
   const from = int(b.from_zone), to = int(b.to_zone), type = b.vehicle_type;
-  if (!from || !to) throw bad('Choose your pickup and destination.');
+  if (!from || !to) throw bad(service === 'ride' ? 'Choose your pickup and destination.' : 'Choose where the rider picks up and where to deliver.');
   if (!TYPES.includes(type)) throw bad('Choose keke, okada or taxi.');
   const active = await q(`SELECT 1 FROM rides WHERE passenger_id=$1 AND status = ANY($2)`, [req.user.id, ACTIVE]);
-  if (active.rows[0]) throw bad('You already have a ride in progress.');
-  const qt = await quote(from, to, type);
+  if (active.rows[0]) throw bad('You already have a trip or delivery in progress.');
+
+  let item = null, recName = null, recPhone = null, itemCost = null, deliveryCode = null;
+  if (service !== 'ride') {
+    item = clean(b.item_desc, 300);
+    if (!item) throw bad(service === 'parcel' ? 'Describe the parcel (what it is and roughly how big).' : 'Describe the errand: what to buy or do, and where.');
+    deliveryCode = String(crypto.randomInt(0, 10000)).padStart(4, '0');
+  }
+  if (service === 'parcel') {
+    recName = clean(b.recipient_name, 80); recPhone = normalizePhone(b.recipient_phone);
+    if (!recName || !recPhone) throw bad("Enter the recipient's name and phone number.");
+  }
+  if (service === 'errand' && b.item_cost !== '' && b.item_cost != null) {
+    itemCost = int(b.item_cost);
+    if (itemCost == null || itemCost < 0 || itemCost > 500000) throw bad('Enter the estimated cost of the items in whole naira.');
+  }
+  const qt = await quote(from, to, type, service);
   if (qt.fare == null) throw bad('The fare for this route has not been set yet. Try another vehicle type or contact the association.');
   const pick = coord(b.pickup_lat, b.pickup_lng);
-  const r = (await q(`INSERT INTO rides(token, passenger_id, vehicle_type, from_zone, to_zone, pickup_note, dropoff_note, fare, night, pickup_lat, pickup_lng)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
-    [token(), req.user.id, type, from, to, clean(b.pickup_note, 120), clean(b.dropoff_note, 120), qt.fare, qt.night, pick && pick[0], pick && pick[1]])).rows[0];
+  const r = (await q(`INSERT INTO rides(token, passenger_id, vehicle_type, from_zone, to_zone, pickup_note, dropoff_note, fare, night, pickup_lat, pickup_lng,
+        service, item_desc, recipient_name, recipient_phone, item_cost, delivery_code)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id, token`,
+    [token(), req.user.id, type, from, to, clean(b.pickup_note, 120), clean(b.dropoff_note, 120), qt.fare, qt.night, pick && pick[0], pick && pick[1],
+     service, item, recName, recPhone, itemCost, deliveryCode])).rows[0];
+  if (service === 'parcel') {
+    const link = `${(process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')}/?t=${r.token}`;
+    sendSms(recPhone, `Waka Bonny: ${req.user.name.split(' ')[0]} is sending you a parcel. Your delivery code is ${deliveryCode}. Give it to the rider ONLY after you receive the parcel. Track it: ${link}`, { soft: true });
+  }
   res.json({ ride: await mine(r.id, req.user.id) });
 }));
 
@@ -47,6 +71,7 @@ router.get('/active', wrap(async (req, res) => {
     [req.user.id, String(REQUEST_TIMEOUT_MIN)]);
   const r = (await q(`${RIDE_SELECT} WHERE r.passenger_id=$1
       AND (r.status = ANY($2) OR (r.status='completed' AND r.paid_at IS NULL)
+           OR (r.status='completed' AND r.rating IS NULL AND r.pay_method='paystack' AND r.paid_at > now() - interval '3 hours')
            OR (r.status='cancelled' AND r.cancelled_by IN ('timeout','driver_suspended') AND r.created_at > now() - interval '10 minutes'))
       ORDER BY r.id DESC LIMIT 1`, [req.user.id, ACTIVE])).rows[0];
   res.json({ ride: r || null });
@@ -67,7 +92,7 @@ router.post('/:id/location', wrap(async (req, res) => {
   const c = coord(req.body?.lat, req.body?.lng);
   if (!c) throw bad('Invalid location.');
   const r = (await q(`UPDATE rides SET pax_lat=$1, pax_lng=$2, pax_loc_at=now()
-      WHERE id=$3 AND passenger_id=$4 AND status='started' RETURNING id`, [c[0], c[1], int(req.params.id), req.user.id])).rows[0];
+      WHERE id=$3 AND passenger_id=$4 AND status='started' AND service='ride' RETURNING id`, [c[0], c[1], int(req.params.id), req.user.id])).rows[0];
   if (r) await addPoint(r.id, c[0], c[1]);
   res.json({ ok: !!r });
 }));
@@ -88,11 +113,22 @@ router.post('/:id/dismiss', wrap(async (req, res) => {
 router.post('/:id/confirm', wrap(async (req, res) => {
   const r = await mine(int(req.params.id), req.user.id);
   if (r.status !== 'completed') throw bad('You can confirm payment once the trip has ended.');
+  if (r.paid_at) throw bad('This trip is already paid.');
   const method = ['cash', 'transfer'].includes(req.body?.pay_method) ? req.body.pay_method : null;
   const rating = int(req.body?.rating);
   if (!method) throw bad('Choose how you paid.');
   if (!rating || rating < 1 || rating > 5) throw bad('Rate your ride from 1 to 5 stars.');
   await q(`UPDATE rides SET pay_method=$1, rating=$2, paid_at=now() WHERE id=$3`, [method, rating, r.id]);
+  res.json({ ok: true });
+}));
+
+// Rating after an online (Paystack) payment
+router.post('/:id/rate', wrap(async (req, res) => {
+  const r = await mine(int(req.params.id), req.user.id);
+  const rating = int(req.body?.rating);
+  if (r.status !== 'completed') throw bad('You can rate once the trip has ended.');
+  if (!rating || rating < 1 || rating > 5) throw bad('Rate from 1 to 5 stars.');
+  await q('UPDATE rides SET rating=$1 WHERE id=$2', [rating, r.id]);
   res.json({ ok: true });
 }));
 

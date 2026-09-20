@@ -13,14 +13,15 @@ function isNight(s) {
 }
 
 // Returns { fare, base, surcharge, night } — fare is null when admin has not set the price
-async function quote(fromZone, toZone, type) {
+async function quote(fromZone, toZone, type, service = 'ride') {
   const a = Math.min(fromZone, toZone), b = Math.max(fromZone, toZone);
   const { rows } = await q('SELECT amount FROM fares WHERE zone_a=$1 AND zone_b=$2 AND vehicle_type=$3', [a, b, type]);
   const base = rows[0] ? rows[0].amount : null;
   const s = await getSettings();
   const night = isNight(s);
   const surcharge = night ? Number(s.night_surcharge || 0) : 0;
-  return { base, surcharge, night, fare: base == null ? null : base + surcharge };
+  const serviceFee = service === 'parcel' ? Number(s.parcel_fee || 0) : service === 'errand' ? Number(s.errand_fee || 0) : 0;
+  return { base, surcharge, serviceFee, night, fare: base == null ? null : base + surcharge + serviceFee };
 }
 
 module.exports = { quote, getSettings };

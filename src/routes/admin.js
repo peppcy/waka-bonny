@@ -3,6 +3,7 @@ const router = require('express').Router();
 const { q } = require('../lib/db');
 const { auth } = require('../lib/auth');
 const { wrap, bad, int, clean, HttpError } = require('../lib/util');
+const { extendWeeks, subSettings } = require('../lib/subs');
 
 router.use(auth('admin'));
 
@@ -19,6 +20,8 @@ router.get('/overview', wrap(async (req, res) => {
         count(*) FILTER (WHERE status='departed')::int AS on_road FROM departures`),
     safety: await one(`SELECT (SELECT count(*) FROM sos_alerts WHERE NOT resolved)::int AS sos,
         (SELECT count(*) FROM complaints WHERE status='open')::int AS complaints`),
+    payments: await one(`SELECT COALESCE(sum(amount) FILTER (WHERE status='success' AND (paid_at AT TIME ZONE 'Africa/Lagos')::date = (now() AT TIME ZONE 'Africa/Lagos')::date),0)::int AS online_today,
+        (SELECT COALESCE(sum(fare),0)::int FROM rides WHERE pay_method='paystack' AND payout_at IS NULL) AS owed_drivers FROM payments`),
     fares_missing: (await one(`SELECT count(*)::int AS n FROM fares f JOIN zones a ON a.id=f.zone_a JOIN zones b ON b.id=f.zone_b
         WHERE f.amount IS NULL AND a.active AND b.active`)).n
   });
@@ -26,7 +29,7 @@ router.get('/overview', wrap(async (req, res) => {
 
 router.get('/drivers', wrap(async (req, res) => {
   const status = req.query.status;
-  const rows = (await q(`SELECT u.id, u.name, u.phone, u.created_at, d.*, z.name AS zone_name,
+  const rows = (await q(`SELECT u.id, u.name, u.phone, u.created_at, d.*, z.name AS zone_name, (d.sub_paid_until > now()) AS sub_active,
       (d.online AND d.last_seen > now() - interval '2 minutes') AS live
     FROM drivers d JOIN users u ON u.id=d.user_id LEFT JOIN zones z ON z.id=d.zone_id
     WHERE ($1::text IS NULL OR d.status=$1) ORDER BY u.created_at DESC LIMIT 200`, [status || null])).rows;
@@ -47,6 +50,7 @@ router.post('/drivers/:id/:action', wrap(async (req, res) => {
     case 'reject': await q(`UPDATE drivers SET status='rejected', online=false WHERE user_id=$1`, [id]); break;
     case 'suspend': await suspend(id); break;
     case 'reinstate': await q(`UPDATE drivers SET status='approved', strikes=0 WHERE user_id=$1`, [id]); break;
+    case 'add-week': await extendWeeks(id, 1); break;  // cash paid to the association
     case 'strike': {
       const s = (await q('UPDATE drivers SET strikes=strikes+1 WHERE user_id=$1 RETURNING strikes', [id])).rows[0].strikes;
       if (s >= 3) await suspend(id);
@@ -93,7 +97,7 @@ router.post('/sos/:id/resolve', wrap(async (req, res) => {
 }));
 
 router.get('/rides/live', wrap(async (req, res) => {
-  const rows = (await q(`SELECT r.id, r.status, r.vehicle_type, r.fare, r.created_at, r.street_hail, r.token, fz.name AS from_name, tz.name AS to_name,
+  const rows = (await q(`SELECT r.id, r.status, r.vehicle_type, r.service, r.fare, r.created_at, r.street_hail, r.token, fz.name AS from_name, tz.name AS to_name,
       p.name AS passenger_name, du.name AS driver_name, d.plate
     FROM rides r JOIN zones fz ON fz.id=r.from_zone JOIN zones tz ON tz.id=r.to_zone JOIN users p ON p.id=r.passenger_id
     LEFT JOIN users du ON du.id=r.driver_id LEFT JOIN drivers d ON d.user_id=r.driver_id
@@ -154,15 +158,30 @@ router.put('/routes/:id', wrap(async (req, res) => {
 }));
 router.get('/departures', wrap(async (req, res) => {
   const rows = (await q(`SELECT dp.*, rt.origin, rt.destination, u.name AS driver_name, d.plate,
-      COALESCE((SELECT sum(seats) FROM bookings b WHERE b.departure_id=dp.id AND b.status IN ('booked','boarded')),0)::int AS seats_booked
+      COALESCE((SELECT sum(seats) FROM bookings b WHERE b.departure_id=dp.id AND (b.status IN ('booked','boarded') OR (b.status='held' AND b.hold_until > now()))),0)::int AS seats_booked
     FROM departures dp JOIN intercity_routes rt ON rt.id=dp.route_id JOIN users u ON u.id=dp.driver_id JOIN drivers d ON d.user_id=dp.driver_id
     WHERE dp.status IN ('scheduled','boarding','departed') OR dp.depart_at > now() - interval '1 day'
     ORDER BY dp.depart_at DESC LIMIT 100`)).rows;
   res.json({ departures: rows });
 }));
 
+// ---- Payouts: fares paid online (Paystack) that the platform owes each driver ----
+router.get('/payouts', wrap(async (req, res) => {
+  const rows = (await q(`SELECT u.id, u.name, u.phone, d.plate, d.vehicle_type, count(r.id)::int AS trips, sum(r.fare)::int AS amount,
+      min(r.completed_at) AS since
+    FROM rides r JOIN users u ON u.id=r.driver_id JOIN drivers d ON d.user_id=u.id
+    WHERE r.pay_method='paystack' AND r.payout_at IS NULL GROUP BY u.id, u.name, u.phone, d.plate, d.vehicle_type ORDER BY amount DESC`)).rows;
+  const recent = (await q(`SELECT p.ref, p.kind, p.amount, p.status, p.channel, p.paid_at, p.created_at, u.name, u.phone
+    FROM payments p JOIN users u ON u.id=p.user_id ORDER BY p.id DESC LIMIT 50`)).rows;
+  res.json({ owed: rows, payments: recent });
+}));
+router.post('/payouts/:driverId', wrap(async (req, res) => {
+  const r = (await q(`UPDATE rides SET payout_at=now() WHERE driver_id=$1 AND pay_method='paystack' AND payout_at IS NULL RETURNING fare`, [int(req.params.driverId)])).rows;
+  res.json({ ok: true, trips: r.length, amount: r.reduce((a, x) => a + x.fare, 0) });
+}));
+
 // ---- Settings ----
-const EDITABLE = ['night_start_hour', 'night_end_hour', 'night_surcharge', 'intercity_open_hour', 'intercity_close_hour', 'safety_desk_phone', 'weekly_subscription'];
+const EDITABLE = ['night_start_hour', 'night_end_hour', 'night_surcharge', 'intercity_open_hour', 'intercity_close_hour', 'safety_desk_phone', 'weekly_subscription', 'subscription_trial_days', 'parcel_fee', 'errand_fee'];
 router.get('/settings', wrap(async (req, res) => {
   const rows = (await q('SELECT key, value FROM settings')).rows;
   res.json({ settings: Object.fromEntries(rows.map(r => [r.key, r.value])) });

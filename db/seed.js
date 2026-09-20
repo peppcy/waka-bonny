@@ -48,7 +48,8 @@ const routes = require('../config/intercity');
   const defaults = {
     night_start_hour: '21', night_end_hour: '6', night_surcharge: null,
     intercity_open_hour: '7', intercity_close_hour: '19',
-    safety_desk_phone: null, weekly_subscription: null
+    safety_desk_phone: null, weekly_subscription: null,
+    subscription_trial_days: '7', parcel_fee: null, errand_fee: null
   };
   for (const [k, v] of Object.entries(defaults)) {
     await q('INSERT INTO settings(key, value) VALUES($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);

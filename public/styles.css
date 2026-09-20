@@ -197,3 +197,12 @@ body.map-open{overflow:hidden}
 /* Map style switch (Satellite / Streets): visible icon without relying on Leaflet's sprite */
 .leaflet-control-layers-toggle{background-image:none!important;display:grid!important;place-items:center;font-size:22px;text-decoration:none}
 .leaflet-control-layers-toggle::before{content:"🗺️"}
+
+/* Booking map, delivery code, payments */
+.map.map-sm{height:clamp(200px,30vh,300px)}
+.code-card{align-items:center;text-align:center;border:2px dashed var(--keke)}
+.code-card .code{font-size:2.4rem}
+.code-input{font-size:2rem!important;letter-spacing:.5em;text-align:center;font-family:"Bricolage Grotesque",sans-serif;font-weight:800}
+.or{display:flex;align-items:center;gap:.6rem;color:var(--muted);font-size:.82rem}
+.or::before,.or::after{content:"";flex:1;height:1px;background:var(--line)}
+.seg button{font-size:.92rem}

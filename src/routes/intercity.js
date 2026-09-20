@@ -4,11 +4,14 @@ const { q, tx } = require('../lib/db');
 const { auth, driver } = require('../lib/auth');
 const { getSettings } = require('../lib/fares');
 const { wrap, bad, int, clean, code, normalizePhone, lagosHour, HttpError } = require('../lib/util');
+const { requireActiveSub } = require('../lib/subs');
+const { HELD_OR_TAKEN } = require('../lib/payments');
+const expireHolds = () => q(`UPDATE bookings SET status='cancelled' WHERE status='held' AND hold_until < now()`);
 
 const SEATS = { bus: 18, sienna: 7 };
 const DEP_SELECT = `SELECT dp.*, rt.origin, rt.destination, rt.stops, u.name AS driver_name, u.phone AS driver_phone,
     d.plate, d.permit_no, d.vehicle_desc,
-    dp.seats_total - COALESCE((SELECT sum(seats) FROM bookings b WHERE b.departure_id=dp.id AND b.status IN ('booked','boarded')),0)::int AS seats_left
+    dp.seats_total - COALESCE((SELECT sum(seats) FROM bookings b WHERE b.departure_id=dp.id AND ${HELD_OR_TAKEN}),0)::int AS seats_left
   FROM departures dp JOIN intercity_routes rt ON rt.id=dp.route_id
   JOIN users u ON u.id=dp.driver_id JOIN drivers d ON d.user_id=dp.driver_id`;
 
@@ -22,6 +25,7 @@ router.get('/routes', wrap(async (req, res) => {
 router.get('/departures', wrap(async (req, res) => {
   const route = int(req.query.route_id);
   if (!route) throw bad('Choose a route.');
+  await expireHolds();
   const rows = (await q(`${DEP_SELECT} WHERE dp.route_id=$1 AND dp.status IN ('scheduled','boarding')
       AND dp.depart_at > now() - interval '1 hour' ORDER BY dp.depart_at LIMIT 30`, [route])).rows;
   res.json({ departures: rows });
@@ -36,19 +40,25 @@ router.post('/departures/:id/book', wrap(async (req, res) => {
   if (seats < 1 || seats > 6) throw bad('You can book 1 to 6 seats.');
   if (!name || !phone) throw bad('Enter the traveller\'s name and phone number for the manifest.');
   if (!nok || !nokPhone) throw bad('Enter a next of kin name and phone number. It is required on the manifest.');
+  // pay: "online" holds the seats for 15 minutes while the passenger pays with Paystack; "park" books and pays cash at the park
+  const payOnline = b.pay === 'online';
+  if (payOnline && !process.env.PAYSTACK_SECRET_KEY) throw bad('Online payment is not set up yet. Choose "Pay at the park".');
+  await expireHolds();
   const out = await tx(async (c) => {
     const dp = (await c.query(`SELECT * FROM departures WHERE id=$1 FOR UPDATE`, [int(req.params.id)])).rows[0];
     if (!dp || !['scheduled', 'boarding'].includes(dp.status)) throw bad('This departure is no longer taking bookings.');
-    const taken = (await c.query(`SELECT COALESCE(sum(seats),0)::int AS n FROM bookings WHERE departure_id=$1 AND status IN ('booked','boarded')`, [dp.id])).rows[0].n;
+    const taken = (await c.query(`SELECT COALESCE(sum(seats),0)::int AS n FROM bookings b WHERE b.departure_id=$1 AND ${HELD_OR_TAKEN}`, [dp.id])).rows[0].n;
     if (taken + seats > dp.seats_total) throw bad(`Only ${dp.seats_total - taken} seat(s) left on this departure.`);
-    return (await c.query(`INSERT INTO bookings(ref, departure_id, passenger_id, seats, passenger_name, passenger_phone, nok_name, nok_phone, drop_stop)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      ['WB' + code(3), dp.id, req.user.id, seats, name, phone, nok, nokPhone, clean(b.drop_stop, 60)])).rows[0];
+    return (await c.query(`INSERT INTO bookings(ref, departure_id, passenger_id, seats, passenger_name, passenger_phone, nok_name, nok_phone, drop_stop, status, hold_until)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      ['WB' + code(3), dp.id, req.user.id, seats, name, phone, nok, nokPhone, clean(b.drop_stop, 60),
+       payOnline ? 'held' : 'booked', payOnline ? new Date(Date.now() + 15 * 60000) : null])).rows[0];
   });
   res.json({ booking: out });
 }));
 
 router.get('/bookings/mine', wrap(async (req, res) => {
+  await expireHolds();
   const rows = (await q(`SELECT b.*, dp.depart_at, dp.price, dp.status AS departure_status, dp.vehicle_type,
       rt.origin, rt.destination, u.name AS driver_name, u.phone AS driver_phone, d.plate
     FROM bookings b JOIN departures dp ON dp.id=b.departure_id JOIN intercity_routes rt ON rt.id=dp.route_id
@@ -59,7 +69,7 @@ router.get('/bookings/mine', wrap(async (req, res) => {
 
 router.post('/bookings/:id/cancel', wrap(async (req, res) => {
   const r = (await q(`UPDATE bookings b SET status='cancelled' FROM departures dp
-      WHERE b.id=$1 AND b.passenger_id=$2 AND b.status='booked' AND dp.id=b.departure_id AND dp.status IN ('scheduled','boarding')
+      WHERE b.id=$1 AND b.passenger_id=$2 AND b.status IN ('booked','held') AND NOT b.paid AND dp.id=b.departure_id AND dp.status IN ('scheduled','boarding')
       RETURNING b.id`, [int(req.params.id), req.user.id])).rows[0];
   if (!r) throw bad('This booking can no longer be cancelled.');
   res.json({ ok: true });
@@ -88,6 +98,7 @@ router.post('/bookings/:id/sos', wrap(async (req, res) => {
 const operator = driver({ types: ['bus', 'sienna'] });
 
 router.post('/departures', operator, wrap(async (req, res) => {
+  await requireActiveSub(req.driver);
   const b = req.body || {};
   const rt = (await q('SELECT * FROM intercity_routes WHERE id=$1 AND active', [int(b.route_id)])).rows[0];
   if (!rt) throw bad('Choose a route.');
@@ -121,7 +132,8 @@ async function ownOrAdmin(req, depId) {
 
 router.get('/departures/:id/manifest', wrap(async (req, res) => {
   const dp = await ownOrAdmin(req, int(req.params.id));
-  const rows = (await q(`SELECT id, ref, seats, passenger_name, passenger_phone, nok_name, nok_phone, drop_stop, status
+  await expireHolds();
+  const rows = (await q(`SELECT id, ref, seats, passenger_name, passenger_phone, nok_name, nok_phone, drop_stop, status, paid
       FROM bookings WHERE departure_id=$1 AND status <> 'cancelled' ORDER BY id`, [dp.id])).rows;
   res.json({ departure: dp, manifest: rows });
 }));
@@ -132,8 +144,8 @@ router.post('/departures/:id/status', wrap(async (req, res) => {
   const next = req.body?.status;
   if (!DEP_FLOW[next] || !DEP_FLOW[next].includes(dp.status)) throw bad('That status change is not allowed.');
   await q('UPDATE departures SET status=$1 WHERE id=$2', [next, dp.id]);
-  if (next === 'departed') await q(`UPDATE bookings SET status='no_show' WHERE departure_id=$1 AND status='booked'`, [dp.id]);
-  if (next === 'cancelled') await q(`UPDATE bookings SET status='cancelled' WHERE departure_id=$1 AND status='booked'`, [dp.id]);
+  if (next === 'departed') { await q(`UPDATE bookings SET status='no_show' WHERE departure_id=$1 AND status='booked'`, [dp.id]); await q(`UPDATE bookings SET status='cancelled' WHERE departure_id=$1 AND status='held'`, [dp.id]); }
+  if (next === 'cancelled') await q(`UPDATE bookings SET status='cancelled' WHERE departure_id=$1 AND status IN ('booked','held')`, [dp.id]);
   res.json({ ok: true });
 }));
 

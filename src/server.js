@@ -7,7 +7,8 @@ const { q } = require('./lib/db');
 
 const app = express();
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '100kb' }));
+// Keep the raw body so the Paystack webhook signature can be checked
+app.use(express.json({ limit: '100kb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 if (origins.length) app.use(cors({ origin: origins }));
 
@@ -24,6 +25,7 @@ app.use('/api/rides', require('./routes/rides'));
 app.use('/api/driver', require('./routes/driver'));
 app.use('/api/intercity', require('./routes/intercity'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/pay', require('./routes/pay'));
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.use(express.static(path.join(__dirname, '..', 'public'), {

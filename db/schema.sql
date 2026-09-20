@@ -147,3 +147,56 @@ CREATE INDEX IF NOT EXISTS ride_points_ride_idx ON ride_points(ride_id, id);
 ALTER TABLE rides ADD COLUMN IF NOT EXISTS pax_lat DOUBLE PRECISION;
 ALTER TABLE rides ADD COLUMN IF NOT EXISTS pax_lng DOUBLE PRECISION;
 ALTER TABLE rides ADD COLUMN IF NOT EXISTS pax_loc_at TIMESTAMPTZ;
+
+-- ===== SMS OTP =====
+CREATE TABLE IF NOT EXISTS otps (
+  id SERIAL PRIMARY KEY,
+  phone TEXT NOT NULL,
+  purpose TEXT NOT NULL CHECK (purpose IN ('register','reset')),
+  code_hash TEXT NOT NULL,
+  attempts INT NOT NULL DEFAULT 0,
+  used BOOLEAN NOT NULL DEFAULT false,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS otps_phone_idx ON otps(phone, purpose, id);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified BOOLEAN NOT NULL DEFAULT false;
+
+-- ===== Deliveries (parcel / errand) share the rides table =====
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS service TEXT NOT NULL DEFAULT 'ride';
+ALTER TABLE rides DROP CONSTRAINT IF EXISTS rides_service_check;
+ALTER TABLE rides ADD CONSTRAINT rides_service_check CHECK (service IN ('ride','parcel','errand'));
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS item_desc TEXT;
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS recipient_name TEXT;
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS recipient_phone TEXT;
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS item_cost INT;
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS delivery_code TEXT;
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS payout_at TIMESTAMPTZ;
+
+-- ===== Payments (Paystack) =====
+CREATE TABLE IF NOT EXISTS payments (
+  id SERIAL PRIMARY KEY,
+  ref TEXT UNIQUE NOT NULL,
+  user_id INT NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL CHECK (kind IN ('ride','seat','sub_auto','sub_week')),
+  ride_id INT REFERENCES rides(id),
+  booking_id INT REFERENCES bookings(id),
+  amount INT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','success','failed')),
+  channel TEXT,
+  paid_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS payments_user_idx ON payments(user_id, id);
+
+-- Intercity: seats held while paying online
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS paid BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS hold_until TIMESTAMPTZ;
+ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_status_check;
+ALTER TABLE bookings ADD CONSTRAINT bookings_status_check CHECK (status IN ('held','booked','boarded','cancelled','no_show'));
+
+-- Weekly driver subscriptions
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS sub_paid_until TIMESTAMPTZ;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS sub_code TEXT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS sub_email_token TEXT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS sub_auto BOOLEAN NOT NULL DEFAULT false;
