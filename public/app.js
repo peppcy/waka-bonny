@@ -88,7 +88,7 @@ function baseLayers() {
     L.tileLayer(esri('Reference/World_Transportation'), { maxNativeZoom: 18, maxZoom: 20, opacity: .9 }),
     L.tileLayer(esri('Reference/World_Boundaries_and_Places'), { maxNativeZoom: 18, maxZoom: 20 })
   ]);
-  const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxNativeZoom: 19, maxZoom: 20, attribution: '© OpenStreetMap' });
+  const streets = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxNativeZoom: 19, maxZoom: 20, attribution: '© OpenStreetMap contributors', referrerPolicy: 'strict-origin-when-cross-origin' });
   return { 'Streets': streets, 'Satellite': satellite };
 }
 

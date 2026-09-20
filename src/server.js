@@ -14,7 +14,9 @@ if (origins.length) app.use(cors({ origin: origins }));
 
 app.use((req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff');
-  res.set('Referrer-Policy', 'same-origin');
+  // Other sites (e.g. OpenStreetMap map tiles) see only our origin, never full page URLs.
+  // OSM's tile policy blocks requests that send no Referer at all.
+  res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   next();
 });
 
