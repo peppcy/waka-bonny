@@ -8,6 +8,14 @@ const { extendWeeks, subSettings } = require('../lib/subs');
 const { getSettings } = require('../lib/fares');
 const { wrap, bad, int, code, HttpError } = require('../lib/util');
 
+// Waka Bonny customers use <phone>@PAYSTACK_EMAIL_DOMAIN. Events for any other address
+// (e.g. Hale customers, forwarded from Hale's webhook) are ignored.
+const DOMAIN = () => (process.env.PAYSTACK_EMAIL_DOMAIN || 'wakabonny.ng').toLowerCase();
+function wakaPhone(email) {
+  const [local, domain] = String(email || '').toLowerCase().split('@');
+  return domain === DOMAIN() && /^234\d{10}$/.test(local) ? local : null;
+}
+
 const base = (req) => (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
 
 // ---- Webhook (public, signature-checked). Set this URL in Paystack: https://YOUR-DOMAIN/api/pay/webhook
@@ -20,8 +28,8 @@ router.post('/webhook', wrap(async (req, res) => {
       const known = (await q('SELECT 1 FROM payments WHERE ref=$1', [data.reference])).rows[0];
       if (known) return void (await applyPayment(data.reference, data));
       // Recurring subscription charge created by Paystack (not by us): find the driver by customer email
-      if (data.plan && data.customer?.email) {
-        const phone = String(data.customer.email).split('@')[0];
+      const phone = data.plan && wakaPhone(data.customer?.email);
+      if (phone) {
         const u = (await q(`SELECT u.id FROM users u JOIN drivers d ON d.user_id=u.id WHERE u.phone=$1`, [phone])).rows[0];
         if (u) {
           const ins = (await q(`INSERT INTO payments(ref, user_id, kind, amount, status, channel, paid_at) VALUES($1,$2,'sub_auto',$3,'success',$4,now())
@@ -29,12 +37,12 @@ router.post('/webhook', wrap(async (req, res) => {
           if (ins) { await extendWeeks(u.id, 1); await q('UPDATE drivers SET sub_auto=true WHERE user_id=$1', [u.id]); }
         }
       }
-    } else if (event === 'subscription.create' && data.customer?.email) {
-      const phone = String(data.customer.email).split('@')[0];
+    } else if (event === 'subscription.create' && wakaPhone(data.customer?.email)) {
+      const phone = wakaPhone(data.customer.email);
       await q(`UPDATE drivers d SET sub_code=$1, sub_email_token=$2, sub_auto=true FROM users u WHERE u.id=d.user_id AND u.phone=$3`,
         [data.subscription_code, data.email_token, phone]);
-    } else if (['subscription.disable', 'subscription.not_renew'].includes(event) && data.customer?.email) {
-      const phone = String(data.customer.email).split('@')[0];
+    } else if (['subscription.disable', 'subscription.not_renew'].includes(event) && wakaPhone(data.customer?.email)) {
+      const phone = wakaPhone(data.customer.email);
       await q(`UPDATE drivers d SET sub_auto=false FROM users u WHERE u.id=d.user_id AND u.phone=$1`, [phone]);
     }
   } catch (e) { console.error('Webhook handling failed:', e); }
