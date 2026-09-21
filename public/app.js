@@ -58,6 +58,15 @@ function closeSheet() { if (S.sheetCleanup) { try { S.sheetCleanup(); } catch {}
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeSheet(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 
+// True while the user is typing in, or has unsaved edits in, a form on the page.
+// Auto-refreshes check this so they never wipe what someone is entering.
+function userEditing() {
+  const a = document.activeElement;
+  if (a && app.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return true;
+  return !!app.querySelector('form[data-dirty]');
+}
+document.addEventListener('input', (e) => { const f = e.target.closest && e.target.closest('#app form'); if (f) f.dataset.dirty = '1'; });
+
 function poll(fn, ms = 4000) { stopPoll(); S.poll = setInterval(() => { if (!document.hidden) fn().catch(() => {}); }, ms); }
 function stopPoll() { if (S.poll) clearInterval(S.poll); S.poll = null; }
 
@@ -881,7 +890,7 @@ async function viewIntercity() {
   $$('[data-sos]').forEach(b => b.onclick = () => sosSheet(`/intercity/bookings/${b.dataset.sos}/sos`));
   $$('[data-trackb]').forEach(b => b.onclick = () => trackBookingSheet(b.dataset.trackb, b.dataset.veh));
   $$('[data-payb]').forEach(b => b.onclick = () => act(b, () => payRedirect(`/pay/booking/${b.dataset.payb}`)));
-  poll(() => ($('#modal').classList.contains('show') ? Promise.resolve() : viewIntercity()), 30000);
+  poll(() => ($('#modal').classList.contains('show') || userEditing() ? Promise.resolve() : viewIntercity()), 30000);
 }
 
 function trackBookingSheet(id, veh) {
@@ -1214,7 +1223,7 @@ async function viewOperator(d) {
   $$('[data-man]').forEach(b => b.onclick = () => manifestSheet(+b.dataset.man));
   bindSub(); bindBank();
   GPS.note();
-  poll(() => ($('#modal').classList.contains('show') ? Promise.resolve() : viewDriver()), 20000);
+  poll(() => ($('#modal').classList.contains('show') || userEditing() ? Promise.resolve() : viewDriver()), 20000);
 }
 
 async function manifestSheet(id) {
@@ -1494,17 +1503,27 @@ async function viewPackage(tok) {
         <p>Pay the rider on delivery: <b>${naira(total)}</b><br><span class="small muted">${naira(p.charge)} logistics + ${naira(p.delivery_fee)} delivery</span></p>
         <button class="btn ghost sm" id="coll">I'll collect it at the depot instead</button></div>`;
     } else if (p.status === 'assigned') {
-      body = `<div class="card"><h3>A rider has been assigned</h3><p class="small">${esc(p.driver?.name || '')} ${esc(p.driver?.plate || '')} will collect it from the depot soon. Have <b>${naira(total)}</b> ready.</p></div>`;
+      body = p.driver
+        ? `<div class="card"><h3>A rider has been assigned</h3><p class="small">${esc(p.driver.name)} (${esc(p.driver.plate || '')}) will collect it from the depot soon. Have <b>${naira(total)}</b> ready.</p></div>`
+        : `<div class="card"><h3>Getting ready for delivery</h3><p class="small">Your package is packed for delivery to ${esc(p.zone_name || '')}. A verified rider will pick it up from the depot soon. Have <b>${naira(total)}</b> ready.</p></div>`;
     } else if (p.status === 'out_for_delivery') {
       body = `<div class="card"><h3>On the way 🛵</h3><p class="small">${esc(p.driver.name)} · ${esc(p.driver.plate)}. Have <b>${naira(total)}</b> ready.</p>
         <a class="btn ghost sm" href="tel:+${esc(p.driver.phone)}">Call the rider</a></div>${MAP_BLOCK}`;
     } else {
       body = `<div class="card"><h3>${p.status === 'delivered' ? 'Delivered ✔' : 'Collected ✔'}</h3><p class="small">This package has been handed over. Thank you for using Waka Bonny.</p></div>`;
     }
-    const sig = p.status + (p.delivery_fee || '');
-    if (render.sig === sig && map) { map.update(p.track); return; }
+    const sig = p.status + '|' + (p.delivery_fee || '') + '|' + (p.driver ? p.driver.name : '');
+    if (render.sig === sig) { if (map) map.update(p.track); return; }   // nothing changed: leave the page (and anything typed) alone
+    if (render.sig && userEditing()) return;                             // changed, but the customer is typing: redraw on the next check
+    const draft = $('#dv') ? { zone: $('#dz') && $('#dz').value, address: $('#dv [name=address]').value, loc: $('#useLoc') && $('#useLoc').checked } : null;
     render.sig = sig; resetView(); map = null;
     app.innerHTML = head + body;
+    if (draft && $('#dv')) {
+      const z = S.meta.zones.find(x => String(x.id) === String(draft.zone));
+      if (z) { $('#dz').value = z.id; $('.zp-in[data-for=dz]').value = z.name; }
+      if (draft.address) $('#dv [name=address]').value = draft.address;
+      if ($('#useLoc') && draft.loc === false) $('#useLoc').checked = false;
+    }
     if ($('#map')) { map = liveMap($('#map'), $('#mapMeta'), { icon: VEH_ICON[p.driver?.vehicle_type] || '🏍️' }); onReset(() => map.destroy && map.destroy()); map.update(p.track); }
     if ($('#dz')) {
       const quote = async () => { const z = $('#dz').value; if (!z) { $('#dq').textContent = ''; return; }
@@ -1514,7 +1533,7 @@ async function viewPackage(tok) {
       $('#dv').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => {
         const b = Object.fromEntries(new FormData(e.target));
         if ($('#useLoc').checked) { const pos = await getPos(); if (pos) { b.lat = pos.latitude; b.lng = pos.longitude; } }
-        await api(`/public/package/${encodeURIComponent(tok)}/deliver`, { method: 'POST', auth: false, body: b }); toast('Delivery requested.'); render.sig = null; render();
+        await api(`/public/package/${encodeURIComponent(tok)}/deliver`, { method: 'POST', auth: false, body: b }); toast('Delivery requested.'); render.sig = null; document.activeElement && document.activeElement.blur(); delete e.target.dataset.dirty; render();
       }); };
     }
     if ($('#coll')) $('#coll').onclick = (e) => act(e.target, async () => { await api(`/public/package/${encodeURIComponent(tok)}/collect`, { method: 'POST', auth: false }); render.sig = null; render(); });
