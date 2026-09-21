@@ -5,6 +5,8 @@ const { auth, driver } = require('../lib/auth');
 const { wrap, bad, int, HttpError } = require('../lib/util');
 const { coord, addPoint, paxFresh } = require('../lib/track');
 const { subState, requireActiveSub } = require('../lib/subs');
+const ps = require('../lib/paystack');
+const { clean } = require('../lib/util');
 
 const ISLAND = ['keke', 'okada', 'taxi'];
 router.use(auth('driver'));
@@ -12,6 +14,46 @@ router.use(auth('driver'));
 router.get('/status', driver({ allowPending: true }), wrap(async (req, res) => res.json({ driver: req.driver })));
 
 router.get('/subscription', driver({ allowPending: true }), wrap(async (req, res) => res.json(await subState(req.driver))));
+
+// ---- Bank account, so customers can pay by transfer (verified with the bank through Paystack) ----
+let bankCache = { at: 0, list: [] };
+router.get('/banks', driver({ allowPending: true }), wrap(async (req, res) => {
+  if (!ps.enabled()) return res.json({ banks: [], verify: false });
+  if (Date.now() - bankCache.at > 24 * 3600e3 || !bankCache.list.length) {
+    const list = await ps.listBanks();
+    bankCache = { at: Date.now(), list: list.filter(b => b.active !== false && (!b.country || b.country === 'Nigeria')).map(b => ({ code: b.code, name: b.name })) };
+  }
+  res.json({ banks: bankCache.list, verify: true });
+}));
+
+router.get('/bank', driver({ allowPending: true }), wrap(async (req, res) => {
+  const d = req.driver;
+  res.json({ bank: d.account_number ? { bank_code: d.bank_code, bank_name: d.bank_name, account_number: d.account_number, account_name: d.account_name, verified: d.account_verified } : null });
+}));
+
+router.put('/bank', driver({ allowPending: true }), wrap(async (req, res) => {
+  const num = String(req.body?.account_number || '').replace(/\D/g, '');
+  if (!/^\d{10}$/.test(num)) throw bad('Enter your 10-digit account number (NUBAN).');
+  let bankCode = clean(req.body?.bank_code, 20), bankName = clean(req.body?.bank_name, 80), accName = null, verified = false;
+  if (ps.enabled()) {
+    if (!bankCode) throw bad('Choose your bank.');
+    try { accName = (await ps.resolveAccount(num, bankCode)).account_name; verified = true; }
+    catch { throw bad("The bank couldn't confirm this account number. Check the number and the bank, then try again."); }
+    if (!bankName) bankName = bankCache.list.find(b => b.code === bankCode)?.name || null;
+  } else {
+    // Without Paystack the name can't be checked with the bank; the driver types it and it's shown as unverified
+    accName = clean(req.body?.account_name, 80);
+    if (!bankName || !accName) throw bad('Enter your bank name and the account name exactly as the bank shows it.');
+  }
+  await q(`UPDATE drivers SET bank_code=$1, bank_name=$2, account_number=$3, account_name=$4, account_verified=$5 WHERE user_id=$6`,
+    [bankCode, bankName, num, accName, verified, req.user.id]);
+  res.json({ bank: { bank_code: bankCode, bank_name: bankName, account_number: num, account_name: accName, verified } });
+}));
+
+router.delete('/bank', driver({ allowPending: true }), wrap(async (req, res) => {
+  await q(`UPDATE drivers SET bank_code=NULL, bank_name=NULL, account_number=NULL, account_name=NULL, account_verified=false WHERE user_id=$1`, [req.user.id]);
+  res.json({ ok: true });
+}));
 
 // GPS from the driver's phone. Keke/okada/taxi and bus/Sienna drivers all report here.
 router.post('/location', driver(), wrap(async (req, res) => {

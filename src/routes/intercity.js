@@ -60,7 +60,8 @@ router.post('/departures/:id/book', wrap(async (req, res) => {
 router.get('/bookings/mine', wrap(async (req, res) => {
   await expireHolds();
   const rows = (await q(`SELECT b.*, dp.depart_at, dp.price, dp.status AS departure_status, dp.vehicle_type,
-      rt.origin, rt.destination, u.name AS driver_name, u.phone AS driver_phone, d.plate
+      rt.origin, rt.destination, u.name AS driver_name, u.phone AS driver_phone, d.plate,
+      d.bank_name AS driver_bank, d.account_number AS driver_account, d.account_name AS driver_account_name, d.account_verified AS driver_account_verified
     FROM bookings b JOIN departures dp ON dp.id=b.departure_id JOIN intercity_routes rt ON rt.id=dp.route_id
     JOIN users u ON u.id=dp.driver_id JOIN drivers d ON d.user_id=dp.driver_id
     WHERE b.passenger_id=$1 ORDER BY dp.depart_at DESC LIMIT 20`, [req.user.id])).rows;

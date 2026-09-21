@@ -3,7 +3,7 @@ const router = require('express').Router();
 const { q } = require('../lib/db');
 const { auth } = require('../lib/auth');
 const { wrap, bad, int, clean, HttpError } = require('../lib/util');
-const { extendWeeks, subSettings } = require('../lib/subs');
+const { extendWeeks, subSettings, startSubscriptionsForAll } = require('../lib/subs');
 
 router.use(auth('admin'));
 
@@ -167,10 +167,11 @@ router.get('/departures', wrap(async (req, res) => {
 
 // ---- Payouts: fares paid online (Paystack) that the platform owes each driver ----
 router.get('/payouts', wrap(async (req, res) => {
-  const rows = (await q(`SELECT u.id, u.name, u.phone, d.plate, d.vehicle_type, count(r.id)::int AS trips, sum(r.fare)::int AS amount,
-      min(r.completed_at) AS since
+  const rows = (await q(`SELECT u.id, u.name, u.phone, d.plate, d.vehicle_type, d.bank_name, d.account_number, d.account_name, d.account_verified,
+      count(r.id)::int AS trips, sum(r.fare)::int AS amount, min(r.completed_at) AS since
     FROM rides r JOIN users u ON u.id=r.driver_id JOIN drivers d ON d.user_id=u.id
-    WHERE r.pay_method='paystack' AND r.payout_at IS NULL GROUP BY u.id, u.name, u.phone, d.plate, d.vehicle_type ORDER BY amount DESC`)).rows;
+    WHERE r.pay_method='paystack' AND r.payout_at IS NULL
+    GROUP BY u.id, u.name, u.phone, d.plate, d.vehicle_type, d.bank_name, d.account_number, d.account_name, d.account_verified ORDER BY amount DESC`)).rows;
   const recent = (await q(`SELECT p.ref, p.kind, p.amount, p.status, p.channel, p.paid_at, p.created_at, u.name, u.phone
     FROM payments p JOIN users u ON u.id=p.user_id ORDER BY p.id DESC LIMIT 50`)).rows;
   res.json({ owed: rows, payments: recent });
@@ -181,19 +182,27 @@ router.post('/payouts/:driverId', wrap(async (req, res) => {
 }));
 
 // ---- Settings ----
-const EDITABLE = ['night_start_hour', 'night_end_hour', 'night_surcharge', 'intercity_open_hour', 'intercity_close_hour', 'safety_desk_phone', 'weekly_subscription', 'subscription_trial_days', 'parcel_fee', 'errand_fee'];
+const EDITABLE = ['night_start_hour', 'night_end_hour', 'night_surcharge', 'intercity_open_hour', 'intercity_close_hour', 'safety_desk_phone', 'weekly_subscription', 'subscription_trial_days', 'parcel_fee', 'errand_fee', 'subscription_mode', 'campaign_end'];
 router.get('/settings', wrap(async (req, res) => {
   const rows = (await q('SELECT key, value FROM settings')).rows;
   res.json({ settings: Object.fromEntries(rows.map(r => [r.key, r.value])) });
 }));
 router.put('/settings', wrap(async (req, res) => {
+  const before = await subSettings();
+  if (req.body?.subscription_mode === 'on') {
+    const amt = Number(req.body.weekly_subscription ?? before.amount);
+    if (!(amt > 0)) throw bad('Set the weekly subscription amount before switching subscriptions on.');
+  }
+  if ('subscription_mode' in (req.body || {}) && !['free', 'on'].includes(req.body.subscription_mode)) throw bad('Invalid subscription mode.');
   for (const k of EDITABLE) {
     if (k in (req.body || {})) {
       const v = req.body[k] === '' || req.body[k] == null ? null : String(req.body[k]).slice(0, 40);
       await q('INSERT INTO settings(key, value) VALUES($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value', [k, v]);
     }
   }
-  res.json({ ok: true });
+  let trialsStarted = 0;
+  if (before.mode !== 'on' && req.body?.subscription_mode === 'on') trialsStarted = await startSubscriptionsForAll();
+  res.json({ ok: true, trials_started: trialsStarted });
 }));
 
 module.exports = router;

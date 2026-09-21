@@ -318,7 +318,7 @@ async function viewAuth() {
       <div class="field"><span class="label">I want to</span>
         <div class="row">
           <button type="button" class="chip" data-r="passenger" aria-pressed="${role === 'passenger'}">Book rides and deliveries<small>Passenger</small></button>
-          <button type="button" class="chip" data-r="driver" aria-pressed="${role === 'driver'}">Drive<small>Keke, okada, taxi, bus, Sienna</small></button>
+          <button type="button" class="chip" data-r="driver" aria-pressed="${role === 'driver'}">Drive or own a vehicle<small>Keke, okada, taxi, bus, Sienna</small></button>
         </div></div>
       <label class="field"><span class="label">Full name</span><input name="name" autocomplete="name" value="${esc(A.name || '')}" required></label>
       ${pinFields('Create a PIN')}
@@ -331,7 +331,12 @@ async function viewAuth() {
           <label class="field"><span class="label">Association / union permit no.</span><input name="permit_no" required></label>
         </div>
         <label class="field"><span class="label">Vehicle description</span><input name="vehicle_desc" placeholder="e.g. Yellow Bajaj keke"></label>
-        <p class="notice small">After signing up, visit the association desk with your ID and vehicle papers. You can take trips once you're verified.</p>` : ''}
+        <div class="field"><span class="label">Who owns this vehicle?</span><div class="row">
+          <button type="button" class="chip" data-own="self" aria-pressed="${(A.own || 'self') === 'self'}">I own it</button>
+          <button type="button" class="chip" data-own="other" aria-pressed="${A.own === 'other'}">I drive for an owner</button></div></div>
+        ${A.own === 'other' ? `<div class="row"><label class="field"><span class="label">Owner's name</span><input name="owner_name" required></label>
+          <label class="field"><span class="label">Owner's phone</span><input name="owner_phone" type="tel" inputmode="tel" required></label></div>` : ''}
+        <p class="notice small">🎉 <b>Free for drivers during our launch.</b> No weekly fee. After signing up, visit the association desk with your ID and vehicle papers; you can take trips once you're verified.</p>` : ''}
       <button class="btn" type="submit">Create account</button>`;
   }
   app.innerHTML = `
@@ -346,6 +351,11 @@ async function viewAuth() {
   const reset = (mode) => { S.auth = { mode, step: 'phone', role: A.role }; viewAuth(); };
   $$('[data-m]').forEach(b => b.onclick = () => reset(b.dataset.m));
   $$('[data-r]').forEach(b => b.onclick = () => { A.name = $('input[name=name]')?.value; A.role = b.dataset.r; viewAuth(); });
+  $$('[data-own]').forEach(b => b.onclick = () => {
+    // keep what was typed while switching ownership
+    const keep = Object.fromEntries(new FormData($('#authForm'))); A.own = b.dataset.own; A.name = keep.name;
+    viewAuth().then(() => { for (const [k, v] of Object.entries(keep)) { const el = $(`#authForm [name="${k}"]`); if (el && !['owner_name', 'owner_phone'].includes(k)) el.value = v; } });
+  });
   if ($('#forgot')) $('#forgot').onclick = () => { const ph = $('input[name=phone]').value; S.auth = { mode: 'reset', step: 'phone', role: 'passenger' }; viewAuth().then(() => { $('input[name=phone]').value = ph; }); };
   const sendCode = async () => {
     const out = await api('/auth/otp/request', { method: 'POST', auth: false, body: { phone: A.phone, purpose: A.mode === 'reset' ? 'reset' : 'register' } });
@@ -375,7 +385,7 @@ async function viewAuth() {
         const out = await api('/auth/reset-pin', { method: 'POST', auth: false, body: { verify_token: A.verify, pin: b.pin } });
         return signedIn(out, 'PIN changed. You are signed in.');
       }
-      const out = await api('/auth/register', { method: 'POST', auth: false, body: { ...b, role: A.role, verify_token: A.verify } });
+      const out = await api('/auth/register', { method: 'POST', auth: false, body: { ...b, role: A.role, owner_type: A.own || 'self', verify_token: A.verify } });
       signedIn(out, 'Account created.');
     });
   };
@@ -617,11 +627,12 @@ function renderPayRate(r) {
       ${svc === 'errand' && r.item_cost ? `<p class="notice warn small">Also pay the rider for the items (about ${naira(r.item_cost)}) in cash, against the receipt.</p>` : ''}
       ${online ? `<button class="btn keke" id="payOnline">Pay ${naira(r.fare)} online (card, bank, USSD)</button><div class="or"><span>or pay the ${svc === 'ride' ? 'driver' : 'rider'} directly</span></div>` : ''}
       <div class="row"><button class="chip" data-pay="cash" aria-pressed="true">Cash<small>Handed over</small></button><button class="chip" data-pay="transfer" aria-pressed="false">Transfer<small>To their account</small></button></div>
+      <div id="xfer" hidden>${transferCard(r, r.fare, (r.driver_name || '').split(' ')[0])}</div>
       <span class="label">Rate ${who}</span>${stars5}
       <button class="btn" id="confirm" disabled>Confirm payment</button>
       <button class="link" data-a="complain">Report a problem</button>`;
   }
-  $$('[data-pay]').forEach(b => b.onclick = () => { pay = b.dataset.pay; $$('[data-pay]').forEach(x => x.setAttribute('aria-pressed', x === b)); });
+  $$('[data-pay]').forEach(b => b.onclick = () => { pay = b.dataset.pay; $$('[data-pay]').forEach(x => x.setAttribute('aria-pressed', x === b)); if ($('#xfer')) $('#xfer').hidden = pay !== 'transfer'; });
   $$('[data-star]').forEach(b => b.onclick = () => { stars = +b.dataset.star; $$('[data-star]').forEach(x => x.classList.toggle('on', +x.dataset.star <= stars)); ($('#confirm') || $('#rate')).disabled = false; });
   const done = (msg) => { toast(msg); Object.assign(S.form, { pickup: '', dropoff: '', item: '', recName: '', recPhone: '', cost: '' }); saveForm(); viewRide(); };
   if ($('#confirm')) $('#confirm').onclick = (e) => act(e.target, async () => { await api(`/rides/${r.id}/confirm`, { method: 'POST', body: { pay_method: pay, rating: stars } }); done('Payment confirmed. Thank you.'); });
@@ -777,6 +788,7 @@ async function viewIntercity() {
         <span class="tag ${b.departure_status === 'departed' || b.status === 'held' ? 'warn' : ''}" style="flex:0 0 auto">${b.status === 'held' ? 'Awaiting payment' : b.departure_status === 'departed' ? 'On the road' : b.departure_status === 'boarding' ? 'Boarding' : 'Booked'}</span></div>
         ${b.status === 'held' ? `<p class="notice warn small">Seats held until ${fmtClock(b.hold_until)} while you pay. Unpaid holds are released automatically.</p>` : ''}
         <dl class="kv"><dt>Booking ref</dt><dd>${esc(b.ref)}</dd><dt>Seats</dt><dd>${b.seats}</dd><dt>Fare</dt><dd>${naira(b.price * b.seats)}${b.paid ? ' · <b>paid online ✔</b>' : ', pay at the park'}</dd><dt>Driver</dt><dd>${esc(b.driver_name)}, <a href="tel:+${esc(b.driver_phone)}">${esc(localPhone(b.driver_phone))}</a></dd></dl>
+        ${!b.paid && b.status === 'booked' && b.driver_account ? `<details class="small"><summary>Pay the driver by transfer</summary>${transferCard(b, b.price * b.seats, b.driver_name.split(' ')[0])}</details>` : ''}
         ${!b.paid && ['held', 'booked'].includes(b.status) && S.meta.settings.online_payments && ['scheduled', 'boarding'].includes(b.departure_status) ? `<button class="btn keke sm" data-payb="${b.id}">Pay ${naira(b.price * b.seats)} online now</button>` : ''}
         <div class="row">${['boarding', 'departed'].includes(b.departure_status) ? `<button class="btn sm" data-trackb="${b.id}" data-veh="${b.vehicle_type}">Track vehicle</button>` : ''}${b.departure_status === 'departed' ? `<button class="btn danger sm" data-sos="${b.id}">SOS</button>` : b.paid ? '<span class="muted small">Paid online. To change or cancel, call the driver or the association desk.</span>' : `<button class="btn ghost sm" data-cancelb="${b.id}">Cancel booking</button>`}</div></div>`).join('')}</div>` : ''}
     <h2>Next departures</h2>
@@ -871,7 +883,9 @@ async function viewDriver() {
       suspended: ['Account suspended', `You have ${d.strikes} strike(s). Contact the association desk to discuss reinstatement.`] }[d.status];
     app.innerHTML = `<div class="card"><h2>${msg[0]}</h2><p class="muted">${msg[1]}</p>
       <dl class="kv"><dt>Vehicle</dt><dd>${VEH_ICON[d.vehicle_type]} ${VEH[d.vehicle_type]}</dd><dt>Plate</dt><dd>${esc(d.plate)}</dd><dt>Permit</dt><dd>${esc(d.permit_no)}</dd></dl></div>
+      ${d.status === 'pending' ? bankCard((await api('/driver/bank')).bank) : ''}
       <button class="btn ghost" id="refresh">Check again</button>`;
+    bindBank();
     $('#refresh').onclick = () => viewDriver().catch(fail);
     return;
   }
@@ -881,6 +895,8 @@ async function viewDriver() {
 
 // Weekly subscription card shown to approved drivers when subscriptions are switched on
 function subCard(sub) {
+  if (sub && sub.campaign) return `<div class="card campaign"><h3>🎉 Free during our launch campaign</h3>
+    <p class="small">No weekly fee for drivers${sub.campaign_end ? ` until ${esc(sub.campaign_end)}` : ''}. Go online, take trips and deliveries, and keep every naira you earn.</p></div>`;
   if (!sub || !sub.required) return '';
   const online = S.meta.settings.online_payments;
   const until = sub.paid_until ? fmtTime(sub.paid_until) : '';
@@ -892,6 +908,59 @@ function subCard(sub) {
   return `<div class="card"><div class="row" style="align-items:center"><h3>Weekly subscription</h3><span class="tag ok" style="flex:0 0 auto">Active</span></div>
     <p class="small muted">Paid until ${until}${sub.auto ? '. Renews automatically every week.' : '.'}</p>${btns}</div>`;
 }
+// Driver's bank account, shown to their customers who choose to pay by transfer
+function bankCard(bank) {
+  if (!bank) return `<div class="card"><h3>🏦 Add your bank account</h3>
+    <p class="small muted">Customers who pay by transfer will see your account number, so the money goes straight to you. Online fares are also paid out here.</p>
+    <button class="btn sm" data-bank="edit">Add account number</button></div>`;
+  return `<div class="card"><div class="row" style="align-items:center"><h3>🏦 Your bank account</h3>
+      <span class="tag ${bank.verified ? 'ok' : 'warn'}" style="flex:0 0 auto">${bank.verified ? '✔ Verified' : 'Not verified'}</span></div>
+    <p class="small"><b>${esc(bank.account_name)}</b><br>${esc(bank.bank_name)} · ${esc(bank.account_number)}</p>
+    <div class="row"><button class="btn ghost sm" data-bank="edit">Change</button><button class="btn ghost sm" data-bank="remove">Remove</button></div></div>`;
+}
+function bindBank() {
+  $$('[data-bank]').forEach(b => b.onclick = () => {
+    if (b.dataset.bank === 'remove') {
+      if (!confirm('Remove your bank account? Customers will no longer see it for transfers.')) return;
+      return act(b, async () => { await api('/driver/bank', { method: 'DELETE' }); toast('Bank account removed.'); viewDriver(); });
+    }
+    bankSheet().catch(fail);
+  });
+}
+async function bankSheet() {
+  const [{ banks, verify }, { bank }] = await Promise.all([api('/driver/banks'), api('/driver/bank')]);
+  sheet(`<h3>Your bank account</h3>
+    <p class="muted small">${verify ? 'We check the number with your bank and show the account name, so customers can be sure the money reaches you.' : 'Enter the details exactly as your bank shows them.'}</p>
+    <form id="bankF" class="list">
+      ${verify ? `<label class="field"><span class="label">Bank</span><select name="bank_code" required><option value="">Choose your bank</option>
+          ${banks.map(k => `<option value="${esc(k.code)}" ${bank && bank.bank_code === k.code ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}</select></label>`
+        : `<label class="field"><span class="label">Bank name</span><input name="bank_name" value="${esc(bank?.bank_name || '')}" required></label>`}
+      <label class="field"><span class="label">Account number (10 digits)</span><input name="account_number" inputmode="numeric" pattern="[0-9]*" maxlength="10" value="${esc(bank?.account_number || '')}" required></label>
+      ${verify ? '' : `<label class="field"><span class="label">Account name</span><input name="account_name" value="${esc(bank?.account_name || '')}" required></label>`}
+      <button class="btn" type="submit">${verify ? 'Check and save' : 'Save'}</button></form>
+    <button class="link" id="closeS">Cancel</button>`);
+  $('#closeS').onclick = closeSheet;
+  $('#bankF').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => {
+    const body = Object.fromEntries(new FormData(e.target));
+    if (verify) body.bank_name = e.target.bank_code.selectedOptions[0]?.textContent;
+    const { bank: saved } = await api('/driver/bank', { method: 'PUT', body });
+    closeSheet(); toast(saved.verified ? `Verified: ${saved.account_name}` : 'Bank account saved.'); viewDriver();
+  }); };
+}
+
+// Transfer details shown to a customer for their own driver
+function transferCard(bank, amount, who) {
+  if (!bank || !bank.driver_account) return `<p class="muted small">${esc(who)} hasn't added a bank account yet. Ask them for their details before transferring.</p>`;
+  return `<div class="card bank-card"><span class="label">Transfer ${amount ? naira(amount) + ' ' : ''}to ${esc(who)}</span>
+    <div class="acct">${esc(bank.driver_account)}</div>
+    <p class="small"><b>${esc(bank.driver_account_name)}</b> · ${esc(bank.driver_bank)} ${bank.driver_account_verified ? '<span class="tag ok">✔ name checked with bank</span>' : '<span class="tag warn">not verified</span>'}</p>
+    <button class="btn ghost sm" type="button" data-copy="${esc(bank.driver_account)}">Copy account number</button></div>`;
+}
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-copy]'); if (!b) return;
+  try { await navigator.clipboard.writeText(b.dataset.copy); toast('Account number copied.'); } catch { toast('Copy failed. Select the number instead.', true); }
+});
+
 function bindSub() {
   $$('[data-sub]').forEach(b => b.onclick = () => act(b, async () => {
     if (b.dataset.sub === 'cancel') { await api('/pay/subscription/cancel', { method: 'POST' }); toast('Automatic weekly payment stopped.'); return viewDriver(); }
@@ -901,7 +970,7 @@ function bindSub() {
 
 async function viewIslandDriver(d) {
   resetView();
-  const [sum, { ride }, sub] = await Promise.all([api('/driver/summary'), api('/driver/active'), api('/driver/subscription')]);
+  const [sum, { ride }, sub, { bank }] = await Promise.all([api('/driver/summary'), api('/driver/active'), api('/driver/subscription'), api('/driver/bank')]);
   // GPS: every 4s on a job (screen kept awake), every 15s while waiting online, off when offline
   if (ride) { GPS.start(4000); GPS.keepAwake(true); }
   else if (d.online) { GPS.start(15000); GPS.keepAwake(false); }
@@ -949,8 +1018,9 @@ async function viewIslandDriver(d) {
     <div class="stats"><div class="stat"><b>${naira(sum.earnings)}</b><span>Fares today</span></div><div class="stat"><b>${sum.trips}</b><span>Jobs today</span></div>
       <div class="stat"><b>${sum.rating ?? '—'}</b><span>Your rating</span></div>${sum.owed ? `<div class="stat"><b>${naira(sum.owed)}</b><span>Paid online, due to you</span></div>` : ''}</div>
     ${body}
+    ${ride ? '' : bankCard(bank)}
     <button class="link" id="badge">Show my QR badge</button>`;
-  bindSub();
+  bindSub(); bindBank();
   $('#onl').onclick = (e) => act(e.target, async () => { await api('/driver/online', { method: 'POST', body: { online: !d.online, zone_id: $('#zone').value } }); viewDriver(); });
   $('#zone').onchange = () => api('/driver/online', { method: 'POST', body: { online: d.online, zone_id: $('#zone').value } }).then(() => toast('Area updated.')).catch(fail);
   $('#badge').onclick = () => badgeSheet(d);
@@ -1019,7 +1089,7 @@ function badgeSheet(d) {
 // ---------- bus / Sienna operator ----------
 async function viewOperator(d) {
   resetView();
-  const [{ routes }, { departures }, sub] = await Promise.all([api('/intercity/routes'), api('/intercity/departures/mine'), api('/driver/subscription')]);
+  const [{ routes }, { departures }, sub, { bank }] = await Promise.all([api('/intercity/routes'), api('/intercity/departures/mine'), api('/driver/subscription'), api('/driver/bank')]);
   const onRoad = departures.some(x => ['boarding', 'departed'].includes(x.status));
   if (onRoad) { GPS.start(5000); GPS.keepAwake(true); } else GPS.stop();
   const cap = d.vehicle_type === 'bus' ? 18 : 7;
@@ -1027,6 +1097,7 @@ async function viewOperator(d) {
   app.innerHTML = `
     <h1>${VEH_ICON[d.vehicle_type]} Your departures</h1>
     ${subCard(sub)}
+    ${bankCard(bank)}
     ${onRoad ? '<div id="gpsNote" class="notice gps-note"></div><p class="muted small">Keep this screen open while driving so booked passengers can track the vehicle.</p>' : ''}
     <form id="newDep" class="card"><h3>Add a departure</h3>
       <label class="field"><span class="label">Route</span><select name="route_id" required>${routes.map(r => `<option value="${r.id}">${esc(r.origin)} to ${esc(r.destination)} (${naira(d.vehicle_type === 'bus' ? r.price_bus : r.price_sienna)})</option>`).join('')}</select></label>
@@ -1054,7 +1125,7 @@ async function viewOperator(d) {
     act(b, async () => { await api(`/intercity/departures/${b.dataset.id}/status`, { method: 'POST', body: { status: b.dataset.st } }); viewDriver(); });
   });
   $$('[data-man]').forEach(b => b.onclick = () => manifestSheet(+b.dataset.man));
-  bindSub();
+  bindSub(); bindBank();
   GPS.note();
   poll(() => ($('#modal').classList.contains('show') ? Promise.resolve() : viewDriver()), 20000);
 }
@@ -1125,7 +1196,8 @@ async function adDrivers(el) {
       ${[['pending', 'Waiting for verification'], ['approved', 'Approved'], ['suspended', 'Suspended'], ['rejected', 'Rejected'], ['', 'All drivers']].map(([v, l]) => `<option value="${v}" ${S.drvFilter === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></div>
     <div class="table-wrap"><table><thead><tr><th>Driver</th><th>Vehicle</th><th>Plate / permit</th><th>Badge</th><th>Strikes</th><th>Subscription</th><th>Status</th><th></th></tr></thead><tbody>
     ${drivers.map(d => `<tr><td><b>${esc(d.name)}</b><br><a href="tel:+${esc(d.phone)}">${esc(localPhone(d.phone))}</a></td>
-      <td>${VEH_ICON[d.vehicle_type]} ${VEH[d.vehicle_type]}<br><span class="muted small">${esc(d.vehicle_desc || '')}</span></td>
+      <td>${VEH_ICON[d.vehicle_type]} ${VEH[d.vehicle_type]}<br><span class="muted small">${esc(d.vehicle_desc || '')}${d.owner_type === 'other' ? `<br>Owner: ${esc(d.owner_name)} ${esc(localPhone(d.owner_phone))}` : '<br>Owner-driver'}</span>
+        ${d.account_number ? `<br><span class="small">🏦 ${esc(d.bank_name)} ${esc(d.account_number)}${d.account_verified ? ' ✔' : ' (unverified)'}</span>` : '<br><span class="muted small">No bank account</span>'}</td>
       <td>${esc(d.plate)}<br>${esc(d.permit_no)}</td><td>${esc(d.badge_code)}</td><td>${d.strikes}/3</td>
       <td>${d.sub_paid_until ? `<span class="tag ${d.sub_active ? 'ok' : 'bad'}">${d.sub_active ? 'to ' : 'expired '}${new Date(d.sub_paid_until).toLocaleDateString('en-NG', { day: 'numeric', month: 'short' })}</span>${d.sub_auto ? ' <span class="tag">auto</span>' : ''}` : '<span class="muted small">not started</span>'}
         <br><button class="link small" data-d="add-week" data-id="${d.user_id}">+1 week (cash)</button></td>
@@ -1276,7 +1348,7 @@ async function adPayments(el) {
   el.innerHTML = `<h2>Online fares owed to drivers</h2>
     <p class="muted small">Passengers who paid by Paystack paid the platform, so each driver is owed those fares. Pay them (bank transfer), then mark as paid out.</p>
     <div class="table-wrap"><table><thead><tr><th>Driver</th><th>Vehicle</th><th>Jobs</th><th>Owed</th><th>Since</th><th></th></tr></thead><tbody>
-    ${owed.map(o => `<tr><td><b>${esc(o.name)}</b><br><a href="tel:+${esc(o.phone)}">${esc(localPhone(o.phone))}</a></td><td>${VEH[o.vehicle_type]} ${esc(o.plate)}</td>
+    ${owed.map(o => `<tr><td><b>${esc(o.name)}</b><br><a href="tel:+${esc(o.phone)}">${esc(localPhone(o.phone))}</a></td><td>${VEH[o.vehicle_type]} ${esc(o.plate)}<br>${o.account_number ? `<span class="small">🏦 ${esc(o.bank_name)} ${esc(o.account_number)}<br>${esc(o.account_name)}${o.account_verified ? ' ✔' : ' (unverified)'}</span>` : '<span class="tag warn">No bank account</span>'}</td>
       <td>${o.trips}</td><td><b>${naira(o.amount)}</b></td><td>${fmtTime(o.since)}</td><td><button class="btn sm" data-po="${o.id}" data-amt="${o.amount}">Mark paid out</button></td></tr>`).join('')
       || '<tr><td colspan="6" class="muted">Nothing owed right now.</td></tr>'}</tbody></table></div>
     <h2>Recent payments</h2>
@@ -1326,15 +1398,24 @@ async function adSettings(el) {
     <p class="muted small">Departures outside these hours are blocked. Clear both to remove the restriction.</p>
     <h3>Parcels and errands</h3>
     <div class="row">${f('parcel_fee', 'Parcel fee (₦)', 'Added to the zone fare.', 'number')}${f('errand_fee', 'Errand fee (₦)', 'Added to the zone fare.', 'number')}</div>
-    <h3>Driver subscriptions</h3>
-    <div class="row">${f('weekly_subscription', 'Weekly subscription (₦)', 'Empty or 0 = off. When set, drivers must be paid up to go online.', 'number')}${f('subscription_trial_days', 'Free trial (days)', 'For drivers starting out.', 'number')}</div>
+    <h3>Driver fees</h3>
+    <label class="field"><span class="label">Mode</span><select name="subscription_mode">
+      <option value="free" ${s.subscription_mode !== 'on' ? 'selected' : ''}>🎉 Launch campaign: free for all drivers</option>
+      <option value="on" ${s.subscription_mode === 'on' ? 'selected' : ''}>Weekly subscription: drivers must be paid up to go online</option></select>
+      <span class="muted small">Switching to weekly gives every driver the free trial days below, counted from the day you switch, so nobody is locked out suddenly.</span></label>
+    ${f('campaign_end', 'Campaign end (optional, shown to drivers)', 'e.g. 31 December 2026. Leave empty to show no date.')}
+    <div class="row">${f('weekly_subscription', 'Weekly subscription (₦)', 'Kept ready for when you switch to weekly.', 'number')}${f('subscription_trial_days', 'Free trial when switching (days)', '', 'number')}</div>
     <h3>Safety</h3>
     ${f('safety_desk_phone', 'Safety desk phone (234…)', 'Shown on every SOS screen.', 'tel')}
     <button class="btn" type="submit">Save settings</button></form>`;
   $('#setf').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => {
     const body = Object.fromEntries(new FormData(e.target));
     if (body.safety_desk_phone) body.safety_desk_phone = body.safety_desk_phone.replace(/\D/g, '').replace(/^0/, '234');
-    await api('/admin/settings', { method: 'PUT', body }); await loadMeta(); toast('Settings saved.');
+    if (body.subscription_mode === 'on' && s.subscription_mode !== 'on'
+      && !confirm(`Switch on weekly subscriptions at ${naira(+body.weekly_subscription || 0)} per week? Every driver gets ${body.subscription_trial_days || 7} free days from today, then must pay to go online.`)) return;
+    const out = await api('/admin/settings', { method: 'PUT', body }); await loadMeta();
+    toast(out.trials_started ? `Weekly subscriptions are on. ${out.trials_started} driver(s) started their free trial.` : 'Settings saved.');
+    s.subscription_mode = body.subscription_mode;
   }); };
 }
 

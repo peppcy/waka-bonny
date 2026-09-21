@@ -87,8 +87,8 @@ router.post('/booking/:id', wrap(async (req, res) => {
 router.post('/subscription', wrap(async (req, res) => {
   const d = (await q('SELECT * FROM drivers WHERE user_id=$1', [req.user.id])).rows[0];
   if (!d) throw bad('Only drivers have subscriptions.');
-  const { amount } = await subSettings();
-  if (!(amount > 0)) throw bad('Driver subscriptions are not switched on.');
+  const { amount, mode } = await subSettings();
+  if (mode !== 'on' || !(amount > 0)) throw bad('No weekly fee is due: drivers use Waka Bonny free during the launch campaign.');
   if (req.body?.mode === 'auto') {
     if (d.sub_auto) throw bad('Automatic weekly payment is already on.');
     const s = await getSettings();

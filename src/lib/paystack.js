@@ -38,4 +38,8 @@ function validSignature(rawBody, signature) {
   return h.length === signature.length && crypto.timingSafeEqual(Buffer.from(h), Buffer.from(signature));
 }
 
-module.exports = { enabled, initialize, verify, createPlan, disableSubscription, validSignature, emailFor };
+const listBanks = () => call('GET', '/bank?country=nigeria&perPage=100');
+const resolveAccount = (accountNumber, bankCode) =>
+  call('GET', `/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`);
+
+module.exports = { enabled, initialize, verify, createPlan, disableSubscription, validSignature, emailFor, listBanks, resolveAccount };

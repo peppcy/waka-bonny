@@ -16,6 +16,7 @@ router.use(auth('passenger', 'admin'));
 
 const RIDE_SELECT = `SELECT r.*, fz.name AS from_name, tz.name AS to_name,
     du.name AS driver_name, du.phone AS driver_phone, d.plate, d.permit_no, d.vehicle_desc, d.badge_code,
+    d.bank_name AS driver_bank, d.account_number AS driver_account, d.account_name AS driver_account_name, d.account_verified AS driver_account_verified,
     (SELECT round(avg(rating)::numeric,1) FROM rides x WHERE x.driver_id=r.driver_id AND x.rating IS NOT NULL) AS driver_rating
   FROM rides r JOIN zones fz ON fz.id=r.from_zone JOIN zones tz ON tz.id=r.to_zone
   LEFT JOIN users du ON du.id=r.driver_id LEFT JOIN drivers d ON d.user_id=r.driver_id`;

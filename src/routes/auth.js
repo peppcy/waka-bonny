@@ -89,6 +89,7 @@ router.post('/register', limiter, wrap(async (req, res) => {
     if (!DRIVER_TYPES.includes(b.vehicle_type)) throw bad('Choose your vehicle type.');
     if (!clean(b.plate)) throw bad('Enter your plate number.');
     if (!clean(b.permit_no)) throw bad('Enter your association or union permit number.');
+    if (b.owner_type === 'other' && (!clean(b.owner_name) || !normalizePhone(b.owner_phone))) throw bad("Enter the vehicle owner's name and phone number.");
   }
   if ((await q('SELECT 1 FROM users WHERE phone=$1', [phone])).rows[0]) throw bad('This phone number already has an account. Sign in instead.');
   const hash = await bcrypt.hash(pin, 10);
@@ -96,8 +97,10 @@ router.post('/register', limiter, wrap(async (req, res) => {
     const u = (await c.query('INSERT INTO users(name, phone, pin_hash, role, emergency_phone, phone_verified) VALUES($1,$2,$3,$4,$5,true) RETURNING id',
       [name, phone, hash, role, emergency])).rows[0];
     if (role === 'driver') {
-      await c.query(`INSERT INTO drivers(user_id, vehicle_type, plate, permit_no, vehicle_desc, badge_code) VALUES($1,$2,$3,$4,$5,$6)`,
-        [u.id, b.vehicle_type, clean(b.plate, 20).toUpperCase(), clean(b.permit_no, 40).toUpperCase(), clean(b.vehicle_desc, 80), code(4)]);
+      const other = b.owner_type === 'other';
+      await c.query(`INSERT INTO drivers(user_id, vehicle_type, plate, permit_no, vehicle_desc, badge_code, owner_type, owner_name, owner_phone) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [u.id, b.vehicle_type, clean(b.plate, 20).toUpperCase(), clean(b.permit_no, 40).toUpperCase(), clean(b.vehicle_desc, 80), code(4),
+         other ? 'other' : 'self', other ? clean(b.owner_name, 80) : null, other ? normalizePhone(b.owner_phone) : null]);
     }
     return u;
   });

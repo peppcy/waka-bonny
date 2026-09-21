@@ -219,3 +219,14 @@ CREATE TABLE IF NOT EXISTS admin_actions (
   reason TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ===== Driver bank account (customers pay by transfer; admin payouts) =====
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS bank_code TEXT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS bank_name TEXT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS account_number TEXT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS account_name TEXT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS account_verified BOOLEAN NOT NULL DEFAULT false;
+-- Vehicle ownership (driver owns it, or drives for an owner)
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS owner_type TEXT NOT NULL DEFAULT 'self';
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS owner_name TEXT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS owner_phone TEXT;
