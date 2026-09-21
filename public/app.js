@@ -416,7 +416,7 @@ async function viewAuth() {
           <option value="">Choose vehicle</option>${Object.entries(VEH).map(([k, v]) => `<option value="${k}">${VEH_ICON[k]} ${v}</option>`).join('')}</select></label>
         <div class="row">
           <label class="field"><span class="label">Plate number</span><input name="plate" required></label>
-          <label class="field"><span class="label">Association / union permit no.</span><input name="permit_no" required></label>
+          <label class="field"><span class="label">Permit no.</span><input name="permit_no" placeholder="Association or union" required></label>
         </div>
         <label class="field"><span class="label">Vehicle description</span><input name="vehicle_desc" placeholder="e.g. Yellow Bajaj keke"></label>
         <div class="field"><span class="label">Who owns this vehicle?</span><div class="row">
@@ -1290,11 +1290,12 @@ async function dpAdd(el) {
   const { packages } = await api('/depot/packages?status=at_depot,delivery_requested,returned');
   el.innerHTML = `
     <form id="p1" class="card"><h3>Register a package</h3>
-      <div class="row"><label class="field"><span class="label">Recipient's name (as on the package)</span><input name="recipient_name" required></label>
-        <label class="field"><span class="label">Recipient's phone</span><input name="recipient_phone" type="tel" inputmode="tel" required></label></div>
-      <label class="field"><span class="label">What is it?</span><input name="description" placeholder="e.g. Carton of noodles, 2 bags of rice"></label>
-      <div class="row"><label class="field"><span class="label">Logistics charge (₦)</span><input name="charge" inputmode="numeric" placeholder="0 if already paid"></label>
-        <label class="field"><span class="label">Number of items</span><input name="qty" type="number" min="1" value="1"></label></div>
+      <div class="row"><label class="field"><span class="label">Recipient's name</span><input name="recipient_name" placeholder="Full name" required></label>
+        <label class="field"><span class="label">Recipient's phone</span><input name="recipient_phone" type="tel" inputmode="tel" placeholder="0803…" required></label></div>
+      <label class="field"><span class="label">What is it?</span><input name="description" placeholder="e.g. Carton of noodles"></label>
+      <div class="row"><label class="field"><span class="label">Charge (₦)</span><input name="charge" inputmode="numeric" placeholder="0 if paid"></label>
+        <label class="field"><span class="label">Items</span><input name="qty" type="number" min="1" value="1"></label></div>
+      <p class="muted small" style="margin-top:-.3rem">Charge = the logistics fee the recipient pays. Enter 0 if it's already paid.</p>
       <button class="btn" type="submit">Register and send SMS</button></form>
     <details class="card"><summary>Register many at once (paste a list)</summary>
       <p class="muted small">One package per line: <b>Name, Phone, Item, Charge</b>. You can copy rows straight from Excel or WhatsApp.</p>
@@ -1549,8 +1550,8 @@ async function adDepots(el) {
       <div class="row"><label class="field"><span class="label">Name</span><input name="name" placeholder="e.g. Jetty Cargo Depot" required></label>
         <label class="field"><span class="label">Area</span>${zoneField('dpz', '', 'zone_id')}</label></div>
       <div class="row"><label class="field"><span class="label">Address</span><input name="address"></label><label class="field"><span class="label">Depot phone</span><input name="phone" type="tel"></label></div>
-      <div class="row" style="align-items:end"><label class="field"><span class="label">Latitude</span><input name="lat" inputmode="decimal"></label><label class="field"><span class="label">Longitude</span><input name="lng" inputmode="decimal"></label>
-        <button type="button" class="btn ghost" id="here" style="flex:0 0 auto;width:auto">Use my location</button></div>
+      <div class="row"><label class="field"><span class="label">Latitude</span><input name="lat" inputmode="decimal"></label><label class="field"><span class="label">Longitude</span><input name="lng" inputmode="decimal"></label></div>
+      <button type="button" class="btn ghost sm" id="here">📍 Use my location</button>
       <p class="muted small">Stand at the depot and tap "Use my location" so drivers see how far away it is. Delivery fees are worked out from the depot's area.</p>
       <button class="btn" type="submit">Save depot</button></form>
     ${depots.map(d => `<div class="card"><div class="row" style="align-items:center"><h3>🏬 ${esc(d.name)}</h3><span class="tag ${d.active ? 'ok' : ''}" style="flex:0 0 auto">${d.active ? 'Active' : 'Off'}</span></div>
@@ -1558,7 +1559,8 @@ async function adDepots(el) {
       <p class="small">${d.waiting} waiting · ${d.out} out for delivery · ${d.handed} handed over</p>
       <span class="label">Agents</span>
       <div class="list">${(d.agents || []).map(a => `<div class="item small"><span>${esc(a.name)} · ${esc(localPhone(a.phone))}</span><button class="btn ghost sm" data-rma="${a.id}" data-dep="${d.id}">Remove</button></div>`).join('') || '<p class="muted small">No agents yet.</p>'}</div>
-      <form class="row" data-adda="${d.id}" style="align-items:end"><label class="field"><span class="label">Add agent by phone (they sign up in the app first)</span><input name="phone" type="tel"></label><button class="btn sm" style="flex:0 0 auto" type="submit">Add</button></form>
+      <form class="row" data-adda="${d.id}" style="align-items:end"><label class="field"><span class="label">Agent's phone</span><input name="phone" type="tel" placeholder="0803 123 4567"></label><button class="btn sm" style="flex:0 0 auto" type="submit">Add agent</button></form>
+      <p class="muted small">The agent signs up in the app as a customer first, then you add them here.</p>
       <button class="btn ghost sm" data-tog="${d.id}" data-on="${d.active}">${d.active ? 'Switch off' : 'Switch on'}</button></div>`).join('')}`;
   $('#here').onclick = async () => { const p = await getPos(); if (!p) return toast('Could not get your location.', true); $('#dpf [name=lat]').value = p.latitude.toFixed(6); $('#dpf [name=lng]').value = p.longitude.toFixed(6); };
   $('#dpf').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await api('/admin/depots', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) }); toast('Depot saved.'); adDepots(el); }); };
@@ -1827,10 +1829,10 @@ async function adSettings(el) {
   const f = (k, label, hint = '', type = 'text') => `<label class="field"><span class="label">${label}</span><input name="${k}" type="${type}" value="${esc(s[k] ?? '')}" placeholder="Not set">${hint ? `<span class="muted small">${hint}</span>` : ''}</label>`;
   el.innerHTML = `<form id="setf" class="card">
     <h3>Night fares</h3>
-    <div class="row">${f('night_start_hour', 'Night starts (hour, 0 to 23)', '', 'number')}${f('night_end_hour', 'Night ends (hour)', '', 'number')}</div>
-    ${f('night_surcharge', 'Night surcharge (₦)', 'Added to island fares at night. Leave empty for none.', 'number')}
+    <div class="row">${f('night_start_hour', 'Night starts (h)', '', 'number')}${f('night_end_hour', 'Night ends (h)', '', 'number')}</div>
+    ${f('night_surcharge', 'Night surcharge (₦)', 'Added to island fares at night. Night hours are 0–23. Leave empty for none.', 'number')}
     <h3>Bonny ⇄ Port Harcourt</h3>
-    <div class="row">${f('intercity_open_hour', 'Road opens (hour)', '', 'number')}${f('intercity_close_hour', 'Road closes (hour)', '', 'number')}</div>
+    <div class="row">${f('intercity_open_hour', 'Road opens (h)', '', 'number')}${f('intercity_close_hour', 'Road closes (h)', '', 'number')}</div>
     <p class="muted small">Departures outside these hours are blocked. Clear both to remove the restriction.</p>
     <h3>Parcels and errands</h3>
     <div class="row">${f('parcel_fee', 'Parcel fee (₦)', 'Added to the zone fare.', 'number')}${f('errand_fee', 'Errand fee (₦)', 'Added to the zone fare.', 'number')}</div>
@@ -1840,7 +1842,7 @@ async function adSettings(el) {
       <option value="on" ${s.subscription_mode === 'on' ? 'selected' : ''}>Weekly subscription: drivers must be paid up to go online</option></select>
       <span class="muted small">Switching to weekly gives every driver the free trial days below, counted from the day you switch, so nobody is locked out suddenly.</span></label>
     ${f('campaign_end', 'Campaign end (optional, shown to drivers)', 'e.g. 31 December 2026. Leave empty to show no date.')}
-    <div class="row">${f('weekly_subscription', 'Weekly subscription (₦)', 'Kept ready for when you switch to weekly.', 'number')}${f('subscription_trial_days', 'Free trial when switching (days)', '', 'number')}</div>
+    <div class="row">${f('weekly_subscription', 'Weekly fee (₦)', 'Kept ready for when you switch to weekly.', 'number')}${f('subscription_trial_days', 'Free trial (days)', 'Given to every driver on the day you switch.', 'number')}</div>
     <h3>Safety</h3>
     ${f('safety_desk_phone', 'Safety desk phone (234…)', 'Shown on every SOS screen.', 'tel')}
     <button class="btn" type="submit">Save settings</button></form>`;

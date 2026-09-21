@@ -223,3 +223,6 @@ details summary{cursor:pointer;color:var(--water);font-weight:600;padding:.3rem 
 .zp-opt.on,.zp-opt:hover{background:var(--water-soft)}
 .zp-opt b{color:var(--water)}
 .zp-none{padding:.75rem .8rem;color:var(--muted);font-size:.88rem}
+
+/* Side-by-side fields: keep labels on one line so the input boxes line up */
+.row > .field > .label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
