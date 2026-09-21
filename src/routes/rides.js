@@ -158,7 +158,8 @@ router.post('/hail', wrap(async (req, res) => {
     if (!d) throw bad('Badge code not recognised. Do not board this vehicle.');
     if (d.status !== 'approved') throw bad('This driver is not currently approved. Do not board this vehicle.');
     if (!TYPES.includes(d.vehicle_type)) throw bad('Buses and Siennas are booked under Bonny to Port Harcourt.');
-    const busy = await c.query(`SELECT 1 FROM rides WHERE driver_id=$1 AND status IN ('accepted','arrived','started')`, [d.user_id]);
+    const busy = await c.query(`SELECT 1 FROM rides WHERE driver_id=$1 AND status IN ('accepted','arrived','started')
+        UNION ALL SELECT 1 FROM runs WHERE driver_id=$1 AND status IN ('accepted','picked_up') LIMIT 1`, [d.user_id]);
     if (busy.rows[0]) throw bad('This driver already has an active trip in the app.');
     const mineActive = await c.query(`SELECT 1 FROM rides WHERE passenger_id=$1 AND status = ANY($2)`, [req.user.id, ACTIVE]);
     if (mineActive.rows[0]) throw bad('You already have a ride in progress.');

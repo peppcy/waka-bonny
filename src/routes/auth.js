@@ -20,7 +20,7 @@ const phoneHash = (phone) => crypto.createHmac('sha256', process.env.JWT_SECRET)
 const devMode = () => provider() === 'console' && process.env.NODE_ENV !== 'production';
 
 async function profile(userId) {
-  const u = (await q('SELECT id, name, phone, role, emergency_phone, phone_verified FROM users WHERE id=$1', [userId])).rows[0];
+  const u = (await q('SELECT id, name, phone, role, emergency_phone, phone_verified, depot_id FROM users WHERE id=$1', [userId])).rows[0];
   const d = (await q(`SELECT vehicle_type, plate, permit_no, vehicle_desc, status, strikes, online, zone_id, badge_code,
       sub_paid_until, sub_auto FROM drivers WHERE user_id=$1`, [userId])).rows[0];
   return { ...u, driver: d || null };

@@ -245,7 +245,7 @@ const GPS = {
 document.addEventListener('visibilitychange', () => { if (!document.hidden && GPS.timer && GPS.every <= 5000) GPS.keepAwake(true); });
 
 // ---------- navigation ----------
-const NAV_ICON = { ride: '🛺', intercity: '🚌', trips: '🧾', account: '👤', driver: '🧭', admin: '📊' };
+const NAV_ICON = { ride: '🛺', intercity: '🚌', trips: '🧾', account: '👤', driver: '🧭', admin: '📊', depot: '🏬' };
 function nav(items) {
   document.body.classList.toggle('has-tabs', items.length > 0);
   $('#nav').innerHTML = items.map(([k, label]) => `<button data-nav="${k}" ${S.view === k ? 'aria-current="page"' : ''}><span class="ni" aria-hidden="true">${NAV_ICON[k] || '•'}</span><span class="nl">${label}</span></button>`).join('');
@@ -256,6 +256,7 @@ function menuFor() {
   if (!u) return [];
   if (u.role === 'admin') return [['admin', 'Desk'], ['account', 'Account']];
   if (u.role === 'driver') return [['driver', 'Work'], ['account', 'Account']];
+  if (u.role === 'agent') return [['depot', 'Depot'], ['account', 'Account']];
   return [['ride', 'Book'], ['intercity', 'Bonny ⇄ PH'], ['trips', 'History'], ['account', 'Account']];
 }
 function go(view, push = true) {
@@ -265,7 +266,7 @@ function go(view, push = true) {
   if (push) history.replaceState(null, '', '/');
   app.classList.toggle('wide', view === 'admin');
   nav(menuFor());
-  const V = { auth: viewAuth, ride: viewRide, intercity: viewIntercity, trips: viewTrips, account: viewAccount, driver: viewDriver, admin: viewAdmin };
+  const V = { auth: viewAuth, ride: viewRide, intercity: viewIntercity, trips: viewTrips, account: viewAccount, driver: viewDriver, admin: viewAdmin, depot: viewDepot };
   (V[view] || viewAuth)().catch(fail);
 }
 function home() {
@@ -274,7 +275,7 @@ function home() {
   // Return to the tab the user was on before a refresh, if their role allows it
   let saved = null; try { saved = sessionStorage.getItem('waka_view'); } catch {}
   if (saved && menuFor().some(([k]) => k === saved)) return go(saved);
-  go(u.role === 'admin' ? 'admin' : u.role === 'driver' ? 'driver' : 'ride');
+  go(u.role === 'admin' ? 'admin' : u.role === 'driver' ? 'driver' : u.role === 'agent' ? 'depot' : 'ride');
 }
 function signOut(msg = true) {
   GPS.stop(); S.auth = null;
@@ -970,7 +971,8 @@ function bindSub() {
 
 async function viewIslandDriver(d) {
   resetView();
-  const [sum, { ride }, sub, { bank }] = await Promise.all([api('/driver/summary'), api('/driver/active'), api('/driver/subscription'), api('/driver/bank')]);
+  const [sum, { ride }, sub, { bank }, { run }] = await Promise.all([api('/driver/summary'), api('/driver/active'), api('/driver/subscription'), api('/driver/bank'), api('/driver/run')]);
+  if (run) return renderRun(d, run, sum);
   // GPS: every 4s on a job (screen kept awake), every 15s while waiting online, off when offline
   if (ride) { GPS.start(4000); GPS.keepAwake(true); }
   else if (d.online) { GPS.start(15000); GPS.keepAwake(false); }
@@ -1016,7 +1018,8 @@ async function viewIslandDriver(d) {
       <button class="switch" role="switch" aria-checked="${d.online}" aria-label="Online" id="onl"></button></div>
     <label class="field"><span class="label">Area you're in now</span><select id="zone">${zoneOptions(d.zone_id)}</select></label>
     <div class="stats"><div class="stat"><b>${naira(sum.earnings)}</b><span>Fares today</span></div><div class="stat"><b>${sum.trips}</b><span>Jobs today</span></div>
-      <div class="stat"><b>${sum.rating ?? '—'}</b><span>Your rating</span></div>${sum.owed ? `<div class="stat"><b>${naira(sum.owed)}</b><span>Paid online, due to you</span></div>` : ''}</div>
+      <div class="stat"><b>${sum.rating ?? '—'}</b><span>Your rating</span></div>${sum.owed ? `<div class="stat"><b>${naira(sum.owed)}</b><span>Paid online, due to you</span></div>` : ''}
+      ${sum.owes_depots ? `<div class="stat"><b>${naira(sum.owes_depots)}</b><span>Charges to hand to depot</span></div>` : ''}</div>
     ${body}
     ${ride ? '' : bankCard(bank)}
     <button class="link" id="badge">Show my QR badge</button>`;
@@ -1043,18 +1046,24 @@ async function viewIslandDriver(d) {
     poll(async () => { const { ride: r } = await api('/driver/active'); if (!r || r.status !== ride.status) viewDriver(); }, 6000);
   } else if (d.online) {
     const load = async () => {
-      const { requests } = await api('/driver/requests');
+      const { requests, runs = [] } = await api('/driver/requests');
       const box = $('#reqs'); if (!box) return;
-      box.innerHTML = requests.length ? requests.map(r => {
+      const away = (r) => r.distance_km != null ? `📍 ${r.distance_km < 1 ? Math.round(r.distance_km * 1000) + ' m' : r.distance_km + ' km'} away` : (r.nearby ? 'In your area' : '');
+      const runHtml = runs.map(r => `<div class="card run-card"><div class="row" style="align-items:center"><span class="tag warn" style="flex:0 0 auto">📦 Depot run</span><span class="small muted" style="text-align:right">${away(r)}</span></div>
+          <div class="ticket"><div><small>You earn</small><span class="amt">${naira(r.fee_total)}</span></div><div style="text-align:right"><small>${r.packages} package(s)</small><small>from ${esc(r.depot_name)}</small></div></div>
+          <p class="small">Deliver to: ${esc(r.areas || '')}. Collect each recipient's logistics charge and hand it to the depot at the end.</p>
+          <button class="btn" data-run="${r.id}">Accept run</button></div>`).join('');
+      box.innerHTML = runHtml + (requests.length ? requests.map(r => {
         const svc = r.service || 'ride';
-        return `<div class="card"><div class="row" style="align-items:center"><span class="tag ${svc === 'ride' ? '' : 'warn'}" style="flex:0 0 auto">${SERVICE[svc].icon} ${SERVICE[svc].label}</span>${r.nearby ? '<span class="small muted" style="text-align:right">Near you</span>' : ''}</div>
+        return `<div class="card"><div class="row" style="align-items:center"><span class="tag ${svc === 'ride' ? '' : 'warn'}" style="flex:0 0 auto">${SERVICE[svc].icon} ${SERVICE[svc].label}</span><span class="small muted" style="text-align:right">${away(r)}</span></div>
           <div class="ticket"><div><small>Fixed fare</small><span class="amt">${naira(r.fare)}</span></div>
           <div style="text-align:right"><small>${esc(r.from_name)}</small><small>to ${esc(r.to_name)}</small></div></div>
           ${svc !== 'ride' ? `<p class="small"><b>${svc === 'parcel' ? 'Parcel' : 'Task'}:</b> ${esc(r.item_desc)}</p>` : ''}
           ${r.item_cost ? `<p class="small">You pay about ${naira(r.item_cost)} for the items; the customer refunds you in cash on delivery.</p>` : ''}
           ${r.pickup_note ? `<p class="small">${svc === 'errand' ? 'Go to' : 'Pickup'}: ${esc(r.pickup_note)}</p>` : ''}
           <button class="btn" data-acc="${r.id}">Accept ${svc === 'ride' ? 'ride' : SERVICE[svc].label.toLowerCase()} for ${esc(r.passenger_first)}</button></div>`;
-      }).join('') : `<p class="muted">No requests right now. Stay near busy spots like the jetty and market.</p>`;
+      }).join('') : (runs.length ? '' : `<p class="muted">No requests right now. Stay near busy spots like the jetty and market.</p>`));
+      $$('[data-run]').forEach(b => b.onclick = () => act(b, async () => { await api(`/driver/runs/${b.dataset.run}/accept`, { method: 'POST' }); toast('Run accepted. Go to the depot to collect the packages.'); viewDriver(); }));
       $$('[data-acc]').forEach(b => b.onclick = () => act(b, async () => { await api(`/driver/rides/${b.dataset.acc}/accept`, { method: 'POST' }); toast('Accepted. Head to the pickup.'); viewDriver(); }));
     };
     await load(); poll(load, 4000);
@@ -1152,13 +1161,325 @@ async function manifestSheet(id) {
   }));
 }
 
+// ======================= DEPOT AGENT =======================
+const PKG_STATUS = {
+  at_depot: ['At depot', ''], delivery_requested: ['Delivery requested', 'warn'], assigned: ['On a run', 'warn'],
+  out_for_delivery: ['Out for delivery', 'warn'], delivered: ['Delivered', 'ok'], collected: ['Collected', 'ok'], returned: ['Returned', 'bad']
+};
+const pkgTag = (st) => `<span class="tag ${PKG_STATUS[st][1]}">${PKG_STATUS[st][0]}</span>`;
+const DEPOT_TABS = [['add', 'Register'], ['collect', 'Hand over'], ['deliver', 'Deliveries'], ['runs', 'Runs']];
+
+async function viewDepot() {
+  resetView();
+  S.depotTab = S.depotTab || 'add';
+  const me = await api('/depot/me');
+  const c = me.counts;
+  app.innerHTML = `<h1>🏬 ${esc(me.depot.name)}</h1>
+    <div class="stats"><div class="stat"><b>${c.at_depot}</b><span>Waiting at depot</span></div><div class="stat"><b>${c.delivery_requested}</b><span>Want delivery</span></div>
+      <div class="stat"><b>${c.out}</b><span>Out on runs</span></div><div class="stat"><b>${c.done_today}</b><span>Handed over today</span></div>
+      ${me.cash_due_from_drivers ? `<div class="stat"><b>${naira(me.cash_due_from_drivers)}</b><span>Cash due from drivers</span></div>` : ''}
+      ${c.returned ? `<div class="stat"><b>${c.returned}</b><span>Returned, not checked in</span></div>` : ''}</div>
+    <div class="seg" role="tablist">${DEPOT_TABS.map(([k, l]) => `<button data-dt="${k}" aria-pressed="${S.depotTab === k}">${l}</button>`).join('')}</div>
+    <div id="dtab" class="list"></div>`;
+  $$('[data-dt]').forEach(b => b.onclick = () => { S.depotTab = b.dataset.dt; stopPoll(); viewDepot().catch(fail); });
+  const T = { add: dpAdd, collect: dpCollect, deliver: dpDeliver, runs: dpRuns };
+  await T[S.depotTab]($('#dtab'), me);
+}
+
+// Parse pasted lines: "Name, Phone, Item, Charge" (commas or tabs, e.g. copied from Excel)
+function parseBulk(text) {
+  return text.split(/\r?\n/).map((l, i) => ({ l: l.trim(), i })).filter(x => x.l && !/^name\b/i.test(x.l)).map(({ l, i }) => {
+    const c = l.split(/\t|,(?![^"]*"(?:[^"]*"[^"]*")*[^"]*$)|;/).map(x => x.replace(/^"|"$/g, '').trim());
+    const phoneIdx = c.findIndex(x => /^\+?\d[\d\s-]{9,}$/.test(x));
+    const name = c[0], phone = phoneIdx >= 0 ? c[phoneIdx] : c[1];
+    const rest = c.filter((_, k) => k !== 0 && k !== (phoneIdx >= 0 ? phoneIdx : 1));
+    const last = rest[rest.length - 1] || '';
+    const isMoney = /^₦?\s?[\d,]+$/.test(last);
+    return { line: i + 1, recipient_name: name, recipient_phone: phone, description: (isMoney ? rest.slice(0, -1) : rest).join(', '), charge: isMoney ? last : '0' };
+  });
+}
+
+async function dpAdd(el) {
+  const { packages } = await api('/depot/packages?status=at_depot,delivery_requested,returned');
+  el.innerHTML = `
+    <form id="p1" class="card"><h3>Register a package</h3>
+      <div class="row"><label class="field"><span class="label">Recipient's name (as on the package)</span><input name="recipient_name" required></label>
+        <label class="field"><span class="label">Recipient's phone</span><input name="recipient_phone" type="tel" inputmode="tel" required></label></div>
+      <label class="field"><span class="label">What is it?</span><input name="description" placeholder="e.g. Carton of noodles, 2 bags of rice"></label>
+      <div class="row"><label class="field"><span class="label">Logistics charge (₦)</span><input name="charge" inputmode="numeric" placeholder="0 if already paid"></label>
+        <label class="field"><span class="label">Number of items</span><input name="qty" type="number" min="1" value="1"></label></div>
+      <button class="btn" type="submit">Register and send SMS</button></form>
+    <details class="card"><summary>Register many at once (paste a list)</summary>
+      <p class="muted small">One package per line: <b>Name, Phone, Item, Charge</b>. You can copy rows straight from Excel or WhatsApp.</p>
+      <textarea id="bulkText" rows="6" placeholder="Ibim George, 08031234567, Carton of noodles, 2500&#10;Mina Jumbo, 08051234567, Bag of rice, 3000"></textarea>
+      <p id="bulkPrev" class="small muted"></p>
+      <button class="btn" id="bulkGo" disabled>Register all</button><div id="bulkErr"></div></details>
+    <h2>Waiting at the depot (${packages.length})</h2>
+    <div class="list">${packages.map(p => `<div class="item"><div><b>${esc(p.recipient_name)}</b> · ${esc(localPhone(p.recipient_phone))}<div class="muted small">${esc(p.ref)} · ${esc(p.description || '')}${p.qty > 1 ? ' ×' + p.qty : ''} · ${naira(p.charge)} · ${fmtTime(p.created_at)}</div></div>
+      <div class="acts">${pkgTag(p.status)}<button class="btn ghost sm" data-resend="${p.id}">Resend SMS</button></div></div>`).join('') || '<p class="muted">No packages waiting.</p>'}</div>`;
+  $('#p1').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => {
+    const { package: p } = await api('/depot/packages', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) });
+    toast(`${p.ref} registered. SMS sent to ${p.recipient_name.split(' ')[0]}.`); e.target.reset(); viewDepot();
+  }); };
+  const prev = () => { const rows = parseBulk($('#bulkText').value); $('#bulkPrev').textContent = rows.length ? `${rows.length} package(s) ready. First: ${rows[0].recipient_name}, ${rows[0].recipient_phone}, ${rows[0].description || '—'}, ₦${rows[0].charge}` : ''; $('#bulkGo').disabled = !rows.length; };
+  $('#bulkText').oninput = prev;
+  $('#bulkGo').onclick = (e) => act(e.target, async () => {
+    const out = await api('/depot/packages/bulk', { method: 'POST', body: { rows: parseBulk($('#bulkText').value) } });
+    toast(`${out.created} package(s) registered and SMS sent.`);
+    if (out.errors.length) { $('#bulkErr').innerHTML = `<div class="notice bad small"><b>Not added:</b><br>${out.errors.map(x => `Line ${x.line}: ${esc(x.error)}`).join('<br>')}</div>`; $('#bulkText').value = ''; prev(); }
+    else viewDepot();
+  });
+  $$('[data-resend]', el).forEach(b => b.onclick = () => act(b, async () => { const r = await api(`/depot/packages/${b.dataset.resend}/resend`, { method: 'POST' }); toast(r.sent ? 'SMS sent again.' : 'SMS queued (check SMS settings).'); }));
+}
+
+async function dpCollect(el) {
+  el.innerHTML = `<form id="cs" class="row" style="align-items:end"><label class="field" style="flex:1"><span class="label">Recipient's name, phone or package ref</span><input name="q" value="${esc(S.collectQ || '')}" autofocus></label>
+      <button class="btn" style="flex:0 0 auto;width:auto" type="submit">Find</button></form><div id="cres" class="list"></div>`;
+  const find = async () => {
+    const term = S.collectQ || '';
+    if (!term) { $('#cres').innerHTML = '<p class="muted">Search for the person collecting. Ask for the pickup code from their SMS.</p>'; return; }
+    const { packages } = await api('/depot/packages?q=' + encodeURIComponent(term));
+    $('#cres').innerHTML = packages.map(p => `<div class="item"><div><b>${esc(p.recipient_name)}</b> · ${esc(localPhone(p.recipient_phone))}
+        <div class="muted small">${esc(p.ref)} · ${esc(p.description || '')} · charge ${naira(p.charge)}</div></div>
+        <div class="acts">${pkgTag(p.status)}${['at_depot', 'delivery_requested', 'returned'].includes(p.status) ? `<button class="btn sm" data-hand="${p.id}">Hand over</button><button class="btn ghost sm" data-book="${p.id}">Deliver</button>` : ''}</div></div>`).join('') || '<p class="muted">No package matches.</p>';
+    $$('[data-hand]', el).forEach(b => b.onclick = () => handoverSheet(packages.find(p => p.id === +b.dataset.hand), find));
+    $$('[data-book]', el).forEach(b => b.onclick = () => bookDeliverySheet(packages.find(p => p.id === +b.dataset.book), find));
+  };
+  $('#cs').onsubmit = (e) => { e.preventDefault(); S.collectQ = new FormData(e.target).get('q').trim(); find().catch(fail); };
+  await find();
+}
+
+function handoverSheet(p, done) {
+  let method = p.charge > 0 ? 'cash' : 'prepaid';
+  sheet(`<h3>Hand over ${esc(p.ref)}</h3>
+    <dl class="kv"><dt>Recipient</dt><dd>${esc(p.recipient_name)}, ${esc(localPhone(p.recipient_phone))}</dd><dt>Item</dt><dd>${esc(p.description || '—')}${p.qty > 1 ? ' ×' + p.qty : ''}</dd><dt>Charge</dt><dd><b>${naira(p.charge)}</b></dd></dl>
+    <label class="field"><span class="label">Pickup code from their SMS</span><input id="hcode" inputmode="numeric" pattern="[0-9]*" maxlength="4" class="code-input" autocomplete="off"></label>
+    ${p.charge > 0 ? `<span class="label">Payment</span><div class="row"><button class="chip" data-hm="cash" aria-pressed="true">Cash</button><button class="chip" data-hm="transfer" aria-pressed="false">Transfer</button><button class="chip" data-hm="prepaid" aria-pressed="false">Already paid</button></div>` : '<p class="muted small">No charge: already paid.</p>'}
+    <details><summary>No code? (lost phone or SMS)</summary><p class="muted small">Check a photo ID matches the name on the package, then write what you checked. This is recorded.</p>
+      <input id="hreason" placeholder="e.g. Checked voter's card, name matches"></details>
+    <button class="btn keke" id="hgo">Confirm hand-over</button><button class="link" id="closeS">Cancel</button>`);
+  $$('[data-hm]').forEach(b => b.onclick = () => { method = b.dataset.hm; $$('[data-hm]').forEach(x => x.setAttribute('aria-pressed', x === b)); });
+  $('#closeS').onclick = closeSheet;
+  $('#hgo').onclick = (e) => act(e.target, async () => {
+    await api(`/depot/packages/${p.id}/handover`, { method: 'POST', body: { code: $('#hcode').value, override_reason: $('#hreason').value, pay_method: method } });
+    closeSheet(); toast(`${p.ref} handed over to ${p.recipient_name.split(' ')[0]}.`); done && done();
+  });
+}
+
+function bookDeliverySheet(p, done) {
+  sheet(`<h3>Deliver ${esc(p.ref)} to ${esc(p.recipient_name)}</h3>
+    <label class="field"><span class="label">Delivery area</span><select id="bz">${zoneOptions(p.zone_id)}</select></label>
+    <label class="field"><span class="label">Address or landmark</span><input id="ba" value="${esc(p.address || '')}"></label>
+    <label class="field"><span class="label">Delivery fee (₦, leave empty to use the fare table)</span><input id="bf" inputmode="numeric"></label>
+    <button class="btn" id="bgo">Add to deliveries</button><button class="link" id="closeS">Cancel</button>`);
+  $('#closeS').onclick = closeSheet;
+  $('#bgo').onclick = (e) => act(e.target, async () => {
+    const out = await api(`/depot/packages/${p.id}/delivery`, { method: 'POST', body: { zone_id: $('#bz').value, address: $('#ba').value, delivery_fee: $('#bf').value } });
+    closeSheet(); toast(`Ready for delivery. Fee ${naira(out.delivery_fee)}.`); done && done();
+  });
+}
+
+async function dpDeliver(el) {
+  const { packages } = await api('/depot/packages?status=delivery_requested');
+  const pick = new Set();
+  el.innerHTML = `<p class="muted small">Recipients who asked for delivery. Tick the ones going in the same direction and send them as one run.</p>
+    <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="all" style="width:auto;min-height:0"></th><th>Recipient</th><th>Area</th><th>Address</th><th>Charge</th><th>Fee</th></tr></thead><tbody>
+    ${packages.map(p => `<tr><td><input type="checkbox" data-pk="${p.id}" style="width:auto;min-height:0"></td><td><b>${esc(p.recipient_name)}</b><br><span class="small">${esc(localPhone(p.recipient_phone))} · ${esc(p.ref)}</span></td>
+      <td>${esc(p.zone_name || '—')}</td><td class="small">${esc(p.address || '')}</td><td>${naira(p.charge)}</td><td>${naira(p.delivery_fee)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No delivery requests yet. Recipients request delivery from their SMS link, or use "Deliver" under Hand over.</td></tr>'}</tbody></table></div>
+    <div class="row" style="align-items:end"><label class="field"><span class="label">Vehicle</span><select id="rv"><option value="okada">🏍️ Okada (small items)</option><option value="keke">🛺 Keke (bigger items)</option><option value="taxi">🚕 Taxi</option></select></label>
+      <button class="btn" id="mk" disabled style="flex:0 0 auto;width:auto">Create run</button></div>`;
+  const upd = () => { const n = pick.size, fee = packages.filter(p => pick.has(p.id)).reduce((a, p) => a + p.delivery_fee, 0); $('#mk').disabled = !n; $('#mk').textContent = n ? `Create run: ${n} package(s), driver earns ${naira(fee)}` : 'Create run'; };
+  $$('[data-pk]', el).forEach(c => c.onchange = () => { c.checked ? pick.add(+c.dataset.pk) : pick.delete(+c.dataset.pk); upd(); });
+  $('#all').onchange = (e) => { $$('[data-pk]', el).forEach(c => { c.checked = e.target.checked; c.checked ? pick.add(+c.dataset.pk) : pick.delete(+c.dataset.pk); }); upd(); };
+  $('#mk').onclick = (e) => act(e.target, async () => {
+    await api('/depot/runs', { method: 'POST', body: { package_ids: [...pick], vehicle_type: $('#rv').value } });
+    toast('Run created. Nearby drivers can accept it now.'); S.depotTab = 'runs'; viewDepot();
+  });
+}
+
+async function dpRuns(el) {
+  const load = async () => {
+    const { runs } = await api('/depot/runs');
+    el.innerHTML = runs.map(r => {
+      const pk = r.packages || [];
+      const returned = pk.filter(p => p.status === 'returned').length;
+      const st = { open: ['Waiting for a driver', 'warn'], accepted: ['Driver coming to depot', 'warn'], picked_up: ['Out for delivery', 'warn'], done: ['Finished', 'ok'], cancelled: ['Cancelled', ''] }[r.status];
+      return `<div class="card"><div class="row" style="align-items:center"><h3>Run #${r.id} · ${VEH_ICON[r.vehicle_type]} ${pk.length} package(s)</h3><span class="tag ${st[1]}" style="flex:0 0 auto">${st[0]}</span></div>
+        ${r.driver_name ? `<p class="small">Driver: <b>${esc(r.driver_name)}</b> ${esc(r.plate || '')} · <a href="tel:+${esc(r.driver_phone)}">${esc(localPhone(r.driver_phone))}</a></p>` : ''}
+        <div class="list">${pk.map(p => `<div class="item small"><span>${esc(p.recipient_name)} · ${esc(p.zone_name || '')}${p.fail_reason ? `<br><span class="muted">${esc(p.fail_reason)}</span>` : ''}</span><span class="acts">${naira(p.charge + (p.delivery_fee || 0))} ${pkgTag(p.status)}</span></div>`).join('')}</div>
+        ${r.status === 'done' ? `<p class="small">Driver earned <b>${naira(r.fee_total)}</b> in delivery fees. Logistics charges collected: <b>${naira(r.cash_due)}</b>${r.remitted_at ? ' · ✔ received by depot' : ''}.</p>` : ''}
+        <div class="row" style="flex-wrap:wrap">
+          ${['open', 'accepted'].includes(r.status) ? `<button class="btn ghost sm" data-rc="${r.id}">Cancel run</button>` : ''}
+          ${r.status === 'done' && returned && !r.returns_received_at ? `<button class="btn sm" data-rr="${r.id}">${returned} returned package(s) back at depot</button>` : ''}
+          ${r.status === 'done' && r.cash_due > 0 && !r.remitted_at ? `<button class="btn keke sm" data-rm="${r.id}" data-amt="${r.cash_due}">Received ${naira(r.cash_due)} from driver</button>` : ''}
+        </div></div>`;
+    }).join('') || '<p class="muted">No runs yet. Create one from Deliveries.</p>';
+    $$('[data-rc]', el).forEach(b => b.onclick = () => { if (confirm('Cancel this run? Its packages go back to the delivery list.')) act(b, async () => { await api(`/depot/runs/${b.dataset.rc}/cancel`, { method: 'POST' }); load(); }); });
+    $$('[data-rr]', el).forEach(b => b.onclick = () => act(b, async () => { const o = await api(`/depot/runs/${b.dataset.rr}/returns`, { method: 'POST' }); toast(`${o.returned} package(s) checked back in.`); viewDepot(); }));
+    $$('[data-rm]', el).forEach(b => b.onclick = () => { if (confirm(`Confirm you received ${naira(+b.dataset.amt)} from the driver?`)) act(b, async () => { await api(`/depot/runs/${b.dataset.rm}/remit`, { method: 'POST' }); toast('Cash recorded.'); viewDepot(); }); });
+  };
+  await load(); poll(load, 10000);
+}
+
+// ======================= DRIVER: DEPOT RUN =======================
+async function renderRun(d, run, sum) {
+  resetView();
+  GPS.start(4000); GPS.keepAwake(true);
+  const pk = run.packages;
+  const left = pk.filter(p => p.status === 'out_for_delivery');
+  const nav = (lat, lng) => lat != null ? `<a class="btn ghost sm" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}">Navigate</a>` : '';
+  let body;
+  if (run.status === 'accepted') {
+    body = `<h2>📦 Go to ${esc(run.depot_name)}</h2>
+      <div class="card"><p>${esc(run.depot_address || '')}</p><div class="row"><a class="btn ghost sm" href="tel:+${esc(run.depot_phone || '')}">Call depot</a>${nav(run.depot_lat, run.depot_lng)}</div></div>
+      <p class="small">Collect these ${pk.length} package(s). Check each ref and name:</p>
+      <div class="list">${pk.map(p => `<div class="item small"><span><b>${esc(p.ref)}</b> · ${esc(p.recipient_name)}<br><span class="muted">${esc(p.description || '')}${p.qty > 1 ? ' ×' + p.qty : ''}</span></span><span>${esc(p.zone_name)}</span></div>`).join('')}</div>
+      <button class="btn keke" id="picked">I have all ${pk.length} package(s)</button>`;
+  } else {
+    body = `<h2>📦 ${left.length ? `${left.length} stop(s) left` : 'All stops done'}</h2>
+      ${MAP_BLOCK}
+      <div class="list">${pk.map(p => {
+        const total = p.charge + (p.delivery_fee || 0);
+        if (p.status !== 'out_for_delivery') return `<div class="item small"><span>${esc(p.recipient_name)} · ${esc(p.zone_name)}</span>${pkgTag(p.status)}</div>`;
+        return `<div class="card"><div class="row" style="align-items:center"><h3>${esc(p.recipient_name)}</h3><b style="flex:0 0 auto">${naira(total)}</b></div>
+          <p class="small">${esc(p.zone_name)} · ${esc(p.address || '')}<br><span class="muted">${esc(p.ref)} · ${esc(p.description || '')} · collect ${naira(p.charge)} charge + ${naira(p.delivery_fee)} delivery</span></p>
+          <div class="row" style="flex-wrap:wrap"><a class="btn ghost sm" href="tel:+${esc(p.recipient_phone)}">Call</a>${nav(p.drop_lat, p.drop_lng)}
+            <button class="btn keke sm" data-dl="${p.id}">Delivered</button><button class="btn ghost sm" data-fl="${p.id}">Not delivered</button></div></div>`;
+      }).join('')}</div>
+      ${left.length ? '' : '<button class="btn keke" id="finish">Finish run</button>'}`;
+  }
+  app.innerHTML = `<div id="gpsNote" class="notice gps-note"></div>
+    <div class="stats"><div class="stat"><b>${naira(run.fee_total)}</b><span>You earn on this run</span></div><div class="stat"><b>${naira(pk.filter(p => p.status === 'delivered').reduce((a, p) => a + p.charge, 0))}</b><span>Charges collected for depot</span></div></div>
+    ${body}`;
+  GPS.note();
+  if ($('#map')) {
+    const lm = liveMap($('#map'), null, { icon: VEH_ICON[d.vehicle_type] });
+    onReset(() => lm.destroy && lm.destroy());
+    const first = left.find(p => p.drop_lat != null);
+    if (first) lm.update({ pickup: { lat: first.drop_lat, lng: first.drop_lng } });
+  }
+  if ($('#picked')) $('#picked').onclick = (e) => act(e.target, async () => { await api(`/driver/runs/${run.id}/picked`, { method: 'POST' }); toast('Recipients have been told you are on the way.'); viewDriver(); });
+  $$('[data-dl]').forEach(b => b.onclick = () => {
+    const p = pk.find(x => x.id === +b.dataset.dl); let m = 'cash';
+    sheet(`<h3>Deliver to ${esc(p.recipient_name)}</h3>
+      <p class="small">Collect <b>${naira(p.charge + (p.delivery_fee || 0))}</b>: ${naira(p.charge)} logistics charge (for the depot) + ${naira(p.delivery_fee)} delivery (yours).</p>
+      <label class="field"><span class="label">Code from their SMS</span><input id="rcode" inputmode="numeric" pattern="[0-9]*" maxlength="4" class="code-input" autocomplete="off"></label>
+      <div class="row"><button class="chip" data-rm2="cash" aria-pressed="true">Paid cash</button><button class="chip" data-rm2="transfer" aria-pressed="false">Paid by transfer</button></div>
+      <button class="btn keke" id="rgo">Confirm delivery</button><button class="link" id="closeS">Cancel</button>`);
+    $$('[data-rm2]').forEach(x => x.onclick = () => { m = x.dataset.rm2; $$('[data-rm2]').forEach(y => y.setAttribute('aria-pressed', y === x)); });
+    $('#closeS').onclick = closeSheet;
+    $('#rgo').onclick = (e) => act(e.target, async () => { await api(`/driver/runs/${run.id}/packages/${p.id}/delivered`, { method: 'POST', body: { code: $('#rcode').value, pay_method: m } }); closeSheet(); toast(`${p.recipient_name.split(' ')[0]}'s package delivered.`); viewDriver(); });
+  });
+  $$('[data-fl]').forEach(b => b.onclick = () => {
+    const p = pk.find(x => x.id === +b.dataset.fl);
+    sheet(`<h3>Couldn't deliver to ${esc(p.recipient_name)}?</h3><p class="muted small">Bring the package back to the depot. The recipient can collect it there.</p>
+      <label class="field"><span class="label">What happened?</span><input id="freason" placeholder="e.g. Not at home, phone switched off"></label>
+      <button class="btn danger" id="fgo">Mark not delivered</button><button class="link" id="closeS">Cancel</button>`);
+    $('#closeS').onclick = closeSheet;
+    $('#fgo').onclick = (e) => act(e.target, async () => { await api(`/driver/runs/${run.id}/packages/${p.id}/failed`, { method: 'POST', body: { reason: $('#freason').value } }); closeSheet(); viewDriver(); });
+  });
+  if ($('#finish')) $('#finish').onclick = (e) => act(e.target, async () => {
+    const o = await api(`/driver/runs/${run.id}/finish`, { method: 'POST' });
+    sheet(`<h3>Run finished 🎉</h3><dl class="kv"><dt>Delivered</dt><dd>${o.delivered}</dd>${o.returned ? `<dt>Bring back</dt><dd>${o.returned} package(s)</dd>` : ''}
+      <dt>You earned</dt><dd><b>${naira(o.earned)}</b></dd><dt>Hand to depot</dt><dd><b>${naira(o.cash_to_depot)}</b> (logistics charges you collected)</dd></dl>
+      <p class="small muted">Take the charges${o.returned ? ' and the undelivered packages' : ''} back to ${esc(o.depot)}. They will confirm it in the app.</p>
+      <button class="btn" id="closeS">Done</button>`);
+    $('#closeS').onclick = () => { closeSheet(); viewDriver(); };
+  });
+  poll(async () => { const { run: r } = await api('/driver/run'); if (!r || r.status !== run.status) viewDriver(); }, 10000);
+}
+
+// ======================= RECIPIENT PACKAGE PAGE (/?p=TOKEN) =======================
+async function viewPackage(tok) {
+  S.view = 'package'; nav(S.user ? menuFor() : []); resetView();
+  let map = null;
+  const render = async () => {
+    const p = await api('/public/package/' + encodeURIComponent(tok), { auth: false });
+    const total = p.charge + (p.delivery_fee || 0);
+    const head = `<h1>📦 Package ${esc(p.ref)}</h1>
+      <p class="muted">For ${esc(p.recipient_name)}${p.description ? ` · ${esc(p.description)}` : ''}${p.qty > 1 ? ` ×${p.qty}` : ''}</p>
+      ${['collected', 'delivered'].includes(p.status) ? '' : `<div class="card code-card"><span class="label">Your pickup / delivery code</span><div class="code">${esc(p.code)}</div>
+        <p class="small muted">Give this code only when the package is in your hands.</p></div>`}`;
+    let body = '';
+    if (['at_depot', 'returned'].includes(p.status)) {
+      body = `${p.status === 'returned' ? `<p class="notice warn small">A delivery was attempted${p.fail_reason ? ` (${esc(p.fail_reason)})` : ''}. It's back at the depot.</p>` : ''}
+        <div class="card"><h3>Collect at the depot</h3><p class="small"><b>${esc(p.depot.name)}</b><br>${esc(p.depot.address || '')}</p>
+          <p class="small">Pay <b>${naira(p.charge)}</b> there and show your code.</p>${p.depot.phone ? `<a class="btn ghost sm" href="tel:+${esc(p.depot.phone)}">Call the depot</a>` : ''}</div>
+        <form id="dv" class="card"><h3>Or get it delivered</h3>
+          <label class="field"><span class="label">Your area</span><select name="zone_id" id="dz">${zoneOptions(p.zone_id)}</select></label>
+          <label class="field"><span class="label">Street, house or landmark</span><input name="address" value="${esc(p.address || '')}" required></label>
+          <label class="small"><input type="checkbox" id="useLoc" checked style="width:auto;min-height:0"> Share my location so the rider finds me</label>
+          <p id="dq" class="small"></p>
+          <button class="btn keke" type="submit">Deliver to me</button></form>`;
+    } else if (p.status === 'delivery_requested') {
+      body = `<div class="card"><h3>Delivery requested ✔</h3><p class="small">To ${esc(p.zone_name)}, ${esc(p.address || '')}. The depot will send it out with a verified rider.</p>
+        <p>Pay the rider on delivery: <b>${naira(total)}</b><br><span class="small muted">${naira(p.charge)} logistics + ${naira(p.delivery_fee)} delivery</span></p>
+        <button class="btn ghost sm" id="coll">I'll collect it at the depot instead</button></div>`;
+    } else if (p.status === 'assigned') {
+      body = `<div class="card"><h3>A rider has been assigned</h3><p class="small">${esc(p.driver?.name || '')} ${esc(p.driver?.plate || '')} will collect it from the depot soon. Have <b>${naira(total)}</b> ready.</p></div>`;
+    } else if (p.status === 'out_for_delivery') {
+      body = `<div class="card"><h3>On the way 🛵</h3><p class="small">${esc(p.driver.name)} · ${esc(p.driver.plate)}. Have <b>${naira(total)}</b> ready.</p>
+        <a class="btn ghost sm" href="tel:+${esc(p.driver.phone)}">Call the rider</a></div>${MAP_BLOCK}`;
+    } else {
+      body = `<div class="card"><h3>${p.status === 'delivered' ? 'Delivered ✔' : 'Collected ✔'}</h3><p class="small">This package has been handed over. Thank you for using Waka Bonny.</p></div>`;
+    }
+    const sig = p.status + (p.delivery_fee || '');
+    if (render.sig === sig && map) { map.update(p.track); return; }
+    render.sig = sig; resetView(); map = null;
+    app.innerHTML = head + body;
+    if ($('#map')) { map = liveMap($('#map'), $('#mapMeta'), { icon: VEH_ICON[p.driver?.vehicle_type] || '🏍️' }); onReset(() => map.destroy && map.destroy()); map.update(p.track); }
+    if ($('#dz')) {
+      const quote = async () => { const z = $('#dz').value; if (!z) { $('#dq').textContent = ''; return; }
+        const { delivery_fee } = await api(`/public/package/${encodeURIComponent(tok)}/quote?zone=${z}`, { auth: false });
+        $('#dq').innerHTML = delivery_fee == null ? '<span class="stale">Delivery to this area is not priced yet. Call the depot.</span>' : `Delivery fee <b>${naira(delivery_fee)}</b>. Total to pay the rider: <b>${naira(p.charge + delivery_fee)}</b>`; };
+      $('#dz').onchange = () => quote().catch(fail); quote().catch(() => {});
+      $('#dv').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => {
+        const b = Object.fromEntries(new FormData(e.target));
+        if ($('#useLoc').checked) { const pos = await getPos(); if (pos) { b.lat = pos.latitude; b.lng = pos.longitude; } }
+        await api(`/public/package/${encodeURIComponent(tok)}/deliver`, { method: 'POST', auth: false, body: b }); toast('Delivery requested.'); render.sig = null; render();
+      }); };
+    }
+    if ($('#coll')) $('#coll').onclick = (e) => act(e.target, async () => { await api(`/public/package/${encodeURIComponent(tok)}/collect`, { method: 'POST', auth: false }); render.sig = null; render(); });
+    if (['collected', 'delivered'].includes(p.status)) stopPoll();
+  };
+  try { await render(); poll(render, 8000); } catch (e) { app.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+}
+
+// ======================= ADMIN: DEPOTS =======================
+async function adDepots(el) {
+  const { depots } = await api('/admin/depots');
+  el.innerHTML = `<form id="dpf" class="card"><h3>Add a depot</h3>
+      <div class="row"><label class="field"><span class="label">Name</span><input name="name" placeholder="e.g. Jetty Cargo Depot" required></label>
+        <label class="field"><span class="label">Area</span><select name="zone_id" required>${zoneOptions('')}</select></label></div>
+      <div class="row"><label class="field"><span class="label">Address</span><input name="address"></label><label class="field"><span class="label">Depot phone</span><input name="phone" type="tel"></label></div>
+      <div class="row" style="align-items:end"><label class="field"><span class="label">Latitude</span><input name="lat" inputmode="decimal"></label><label class="field"><span class="label">Longitude</span><input name="lng" inputmode="decimal"></label>
+        <button type="button" class="btn ghost" id="here" style="flex:0 0 auto;width:auto">Use my location</button></div>
+      <p class="muted small">Stand at the depot and tap "Use my location" so drivers see how far away it is. Delivery fees are worked out from the depot's area.</p>
+      <button class="btn" type="submit">Save depot</button></form>
+    ${depots.map(d => `<div class="card"><div class="row" style="align-items:center"><h3>🏬 ${esc(d.name)}</h3><span class="tag ${d.active ? 'ok' : ''}" style="flex:0 0 auto">${d.active ? 'Active' : 'Off'}</span></div>
+      <p class="small">${esc(d.zone_name || '')} · ${esc(d.address || '')}${d.phone ? ' · ' + esc(localPhone(d.phone)) : ''}${d.lat != null ? '' : ' · <span class="stale">no map location</span>'}</p>
+      <p class="small">${d.waiting} waiting · ${d.out} out for delivery · ${d.handed} handed over</p>
+      <span class="label">Agents</span>
+      <div class="list">${(d.agents || []).map(a => `<div class="item small"><span>${esc(a.name)} · ${esc(localPhone(a.phone))}</span><button class="btn ghost sm" data-rma="${a.id}" data-dep="${d.id}">Remove</button></div>`).join('') || '<p class="muted small">No agents yet.</p>'}</div>
+      <form class="row" data-adda="${d.id}" style="align-items:end"><label class="field"><span class="label">Add agent by phone (they sign up in the app first)</span><input name="phone" type="tel"></label><button class="btn sm" style="flex:0 0 auto" type="submit">Add</button></form>
+      <button class="btn ghost sm" data-tog="${d.id}" data-on="${d.active}">${d.active ? 'Switch off' : 'Switch on'}</button></div>`).join('')}`;
+  $('#here').onclick = async () => { const p = await getPos(); if (!p) return toast('Could not get your location.', true); $('#dpf [name=lat]').value = p.latitude.toFixed(6); $('#dpf [name=lng]').value = p.longitude.toFixed(6); };
+  $('#dpf').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await api('/admin/depots', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) }); toast('Depot saved.'); adDepots(el); }); };
+  $$('[data-adda]', el).forEach(f => f.onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await api(`/admin/depots/${f.dataset.adda}/agents`, { method: 'POST', body: Object.fromEntries(new FormData(f)) }); toast('Agent added. They see the Depot screen next time they open the app.'); adDepots(el); }); });
+  $$('[data-rma]', el).forEach(b => b.onclick = () => act(b, async () => { await api(`/admin/depots/${b.dataset.dep}/agents/${b.dataset.rma}`, { method: 'DELETE' }); adDepots(el); }));
+  $$('[data-tog]', el).forEach(b => b.onclick = () => act(b, async () => {
+    const d = depots.find(x => x.id === +b.dataset.tog);
+    await api('/admin/depots', { method: 'POST', body: { id: d.id, name: d.name, zone_id: d.zone_id, address: d.address, phone: d.phone, lat: d.lat, lng: d.lng, active: !d.active } }); adDepots(el);
+  }));
+}
+
 // ---------- admin desk ----------
-const ADMIN_TABS = [['overview', 'Overview'], ['users', 'Users'], ['drivers', 'Drivers'], ['fares', 'Fares & areas'], ['intercity', 'Bonny ⇄ PH'], ['payments', 'Payments'], ['safety', 'Safety'], ['settings', 'Settings']];
+const ADMIN_TABS = [['overview', 'Overview'], ['users', 'Users'], ['drivers', 'Drivers'], ['fares', 'Fares & areas'], ['intercity', 'Bonny ⇄ PH'], ['depots', 'Depots'], ['payments', 'Payments'], ['safety', 'Safety'], ['settings', 'Settings']];
 async function viewAdmin() {
   S.adminTab = S.adminTab || 'overview';
   app.innerHTML = `<div class="seg" role="tablist" style="overflow-x:auto">${ADMIN_TABS.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-pressed="${S.adminTab === k}">${l}</button>`).join('')}</div><div id="tab" class="list"></div>`;
   $$('[data-tab]').forEach(b => b.onclick = () => { S.adminTab = b.dataset.tab; stopPoll(); viewAdmin().catch(fail); });
-  const T = { overview: adOverview, users: adUsers, drivers: adDrivers, fares: adFares, intercity: adIntercity, payments: adPayments, safety: adSafety, settings: adSettings };
+  const T = { overview: adOverview, users: adUsers, drivers: adDrivers, fares: adFares, intercity: adIntercity, depots: adDepots, payments: adPayments, safety: adSafety, settings: adSettings };
   await T[S.adminTab]($('#tab'));
 }
 
@@ -1432,6 +1753,7 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
   if (S.token) { try { S.user = (await api('/auth/me')).user; } catch { S.user = null; } }
   if (p.get('pay') && S.user) return handlePayReturn(p.get('pay'));
   if (p.get('t')) return viewShare(p.get('t'));
+  if (p.get('p')) return viewPackage(p.get('p'));
   if (p.get('badge')) return viewBadge(p.get('badge'));
   home();
 })();

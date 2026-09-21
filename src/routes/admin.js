@@ -2,7 +2,7 @@
 const router = require('express').Router();
 const { q } = require('../lib/db');
 const { auth } = require('../lib/auth');
-const { wrap, bad, int, clean, HttpError } = require('../lib/util');
+const { wrap, bad, int, clean, normalizePhone, HttpError } = require('../lib/util');
 const { extendWeeks, subSettings, startSubscriptionsForAll } = require('../lib/subs');
 
 router.use(auth('admin'));
@@ -179,6 +179,47 @@ router.get('/payouts', wrap(async (req, res) => {
 router.post('/payouts/:driverId', wrap(async (req, res) => {
   const r = (await q(`UPDATE rides SET payout_at=now() WHERE driver_id=$1 AND pay_method='paystack' AND payout_at IS NULL RETURNING fare`, [int(req.params.driverId)])).rows;
   res.json({ ok: true, trips: r.length, amount: r.reduce((a, x) => a + x.fare, 0) });
+}));
+
+// ---- Depots and their agents ----
+router.get('/depots', wrap(async (req, res) => {
+  const rows = (await q(`SELECT d.*, z.name AS zone_name,
+      (SELECT json_agg(json_build_object('id',u.id,'name',u.name,'phone',u.phone)) FROM users u WHERE u.depot_id=d.id AND u.role='agent' AND u.deleted_at IS NULL) AS agents,
+      (SELECT count(*) FROM packages p WHERE p.depot_id=d.id AND p.status IN ('at_depot','delivery_requested','returned'))::int AS waiting,
+      (SELECT count(*) FROM packages p WHERE p.depot_id=d.id AND p.status IN ('assigned','out_for_delivery'))::int AS out,
+      (SELECT count(*) FROM packages p WHERE p.depot_id=d.id AND p.status IN ('collected','delivered'))::int AS handed
+    FROM depots d LEFT JOIN zones z ON z.id=d.zone_id ORDER BY d.id`)).rows;
+  res.json({ depots: rows });
+}));
+router.post('/depots', wrap(async (req, res) => {
+  const b = req.body || {};
+  const name = clean(b.name, 80);
+  if (!name) throw bad('Enter the depot name.');
+  const zone = int(b.zone_id);
+  if (!zone) throw bad('Choose the area the depot is in. Delivery fees are worked out from here.');
+  const lat = b.lat === '' || b.lat == null ? null : Number(b.lat), lng = b.lng === '' || b.lng == null ? null : Number(b.lng);
+  if ((lat != null && !Number.isFinite(lat)) || (lng != null && !Number.isFinite(lng))) throw bad('Location must be numbers.');
+  const phone = b.phone ? normalizePhone(b.phone) : null;
+  const fields = [name, zone, clean(b.address, 200), phone, lat, lng];
+  const id = int(req.body?.id);
+  if (id) await q(`UPDATE depots SET name=$1, zone_id=$2, address=$3, phone=$4, lat=$5, lng=$6, active=COALESCE($7, active) WHERE id=$8`, [...fields, typeof b.active === 'boolean' ? b.active : null, id]);
+  else await q(`INSERT INTO depots(name, zone_id, address, phone, lat, lng) VALUES($1,$2,$3,$4,$5,$6)`, fields);
+  res.json({ ok: true });
+}));
+// Make an existing account a depot agent (they sign up normally first)
+router.post('/depots/:id/agents', wrap(async (req, res) => {
+  const phone = normalizePhone(req.body?.phone);
+  if (!phone) throw bad('Enter the agent\'s phone number.');
+  const u = (await q(`SELECT id, role FROM users WHERE phone=$1 AND deleted_at IS NULL`, [phone])).rows[0];
+  if (!u) throw bad('No account uses this number. Ask the agent to sign up in the app first, then add them here.');
+  if (u.role === 'admin') throw bad('This is an admin account.');
+  if (u.role === 'driver') throw bad('This number is registered as a driver. Agents need their own customer account.');
+  await q(`UPDATE users SET role='agent', depot_id=$1 WHERE id=$2`, [int(req.params.id), u.id]);
+  res.json({ ok: true });
+}));
+router.delete('/depots/:id/agents/:uid', wrap(async (req, res) => {
+  await q(`UPDATE users SET role='passenger', depot_id=NULL WHERE id=$1 AND depot_id=$2 AND role='agent'`, [int(req.params.uid), int(req.params.id)]);
+  res.json({ ok: true });
 }));
 
 // ---- Settings ----

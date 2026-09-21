@@ -230,3 +230,66 @@ ALTER TABLE drivers ADD COLUMN IF NOT EXISTS account_verified BOOLEAN NOT NULL D
 ALTER TABLE drivers ADD COLUMN IF NOT EXISTS owner_type TEXT NOT NULL DEFAULT 'self';
 ALTER TABLE drivers ADD COLUMN IF NOT EXISTS owner_name TEXT;
 ALTER TABLE drivers ADD COLUMN IF NOT EXISTS owner_phone TEXT;
+
+-- ===== Depots, packages and delivery runs =====
+CREATE TABLE IF NOT EXISTS depots (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  zone_id INT REFERENCES zones(id),
+  address TEXT,
+  phone TEXT,
+  lat DOUBLE PRECISION,
+  lng DOUBLE PRECISION,
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS depot_id INT REFERENCES depots(id);
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('passenger','driver','admin','agent'));
+
+CREATE TABLE IF NOT EXISTS runs (
+  id SERIAL PRIMARY KEY,
+  depot_id INT NOT NULL REFERENCES depots(id),
+  driver_id INT REFERENCES users(id),
+  vehicle_type TEXT NOT NULL CHECK (vehicle_type IN ('keke','okada','taxi')),
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','accepted','picked_up','done','cancelled')),
+  fee_total INT NOT NULL DEFAULT 0,
+  cash_due INT NOT NULL DEFAULT 0,
+  created_by INT REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  accepted_at TIMESTAMPTZ, picked_at TIMESTAMPTZ, done_at TIMESTAMPTZ,
+  returns_received_at TIMESTAMPTZ,
+  remitted_at TIMESTAMPTZ, remitted_by INT REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status, vehicle_type);
+
+CREATE TABLE IF NOT EXISTS packages (
+  id SERIAL PRIMARY KEY,
+  ref TEXT UNIQUE NOT NULL,
+  token TEXT UNIQUE NOT NULL,
+  depot_id INT NOT NULL REFERENCES depots(id),
+  recipient_name TEXT NOT NULL,
+  recipient_phone TEXT NOT NULL,
+  description TEXT,
+  qty INT NOT NULL DEFAULT 1,
+  charge INT NOT NULL DEFAULT 0,
+  delivery_fee INT,
+  zone_id INT REFERENCES zones(id),
+  address TEXT,
+  drop_lat DOUBLE PRECISION, drop_lng DOUBLE PRECISION,
+  code TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'at_depot'
+    CHECK (status IN ('at_depot','delivery_requested','assigned','out_for_delivery','delivered','collected','returned')),
+  run_id INT REFERENCES runs(id),
+  pay_method TEXT,
+  collected_amount INT,
+  fail_reason TEXT,
+  handed_at TIMESTAMPTZ,
+  handover_note TEXT,
+  created_by INT REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS packages_depot_idx ON packages(depot_id, status);
+CREATE INDEX IF NOT EXISTS packages_phone_idx ON packages(recipient_phone);
+CREATE INDEX IF NOT EXISTS packages_run_idx ON packages(run_id);

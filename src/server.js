@@ -29,6 +29,7 @@ app.use('/api/intercity', require('./routes/intercity'));
 app.use('/api/admin/users', require('./routes/users-admin'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/pay', require('./routes/pay'));
+app.use('/api/depot', require('./routes/depot'));
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.use(express.static(path.join(__dirname, '..', 'public'), {
