@@ -5,39 +5,14 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const { pool, q } = require('../src/lib/db');
 const { normalizePhone } = require('../src/lib/util');
-const fallbackNeighbourhoods = require('../config/neighbourhoods');
-
-// Pull the neighbourhood list from Hale so both apps use the same names.
-// HALE_API_URL = Hale API base (e.g. https://api.haleapp.ng); HALE_CITY optionally filters by city.
-async function loadNeighbourhoods() {
-  const base = (process.env.HALE_API_URL || '').replace(/\/$/, '');
-  if (!base) { console.log('HALE_API_URL not set: using config/neighbourhoods.js'); return fallbackNeighbourhoods; }
-  const path = process.env.HALE_NEIGHBOURHOODS_PATH || '/api/neighbourhoods';
-  const res = await fetch(base + path);
-  if (!res.ok) throw new Error(`Hale returned ${res.status} for ${base + path}`);
-  const { data } = await res.json();
-  const city = (process.env.HALE_CITY || '').toLowerCase();
-  const names = (data || [])
-    .filter(n => !city || String(n.city || '').toLowerCase().includes(city))
-    .map(n => String(n.name || '').trim()).filter(Boolean);
-  if (!names.length) throw new Error('Hale returned no neighbourhoods. Check HALE_API_URL and HALE_CITY.');
-  console.log(`Loaded ${names.length} neighbourhoods from Hale.`);
-  return [...new Set(names)];
-}
+const { syncZones } = require('../src/lib/zonesync');
 const routes = require('../config/intercity');
 
 (async () => {
-  const neighbourhoods = await loadNeighbourhoods();
   await q(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
-
-  for (const [i, name] of neighbourhoods.entries()) {
-    await q('INSERT INTO zones(name, sort) VALUES($1,$2) ON CONFLICT (name) DO UPDATE SET sort=EXCLUDED.sort', [name, i]);
-  }
-  // Placeholder fares (amount NULL) for every zone pair and vehicle type
-  await q(`INSERT INTO fares(zone_a, zone_b, vehicle_type, amount)
-           SELECT a.id, b.id, t.v, NULL FROM zones a JOIN zones b ON a.id <= b.id
-           CROSS JOIN (VALUES ('keke'),('okada'),('taxi')) t(v)
-           ON CONFLICT DO NOTHING`);
+  const z = await syncZones({ allowFallback: true });
+  console.log(z.source === 'hale' ? `Loaded ${z.total} neighbourhoods from Hale (added ${z.added.length}, hidden ${z.hidden.length}).`
+    : z.source === 'fallback' ? `Using config/neighbourhoods.js (${z.total} areas).` : 'Hale not reachable: kept the existing areas.');
 
   for (const r of routes) {
     await q(`INSERT INTO intercity_routes(origin, destination, stops) VALUES($1,$2,$3)
@@ -63,6 +38,6 @@ const routes = require('../config/intercity');
              ON CONFLICT (phone) DO UPDATE SET role='admin'`, [process.env.ADMIN_NAME || 'Admin', phone, hash]);
     console.log('Admin account ready:', phone);
   }
-  console.log(`Seeded ${neighbourhoods.length} zones and ${routes.length} intercity routes.`);
+  console.log(`Seeded ${routes.length} intercity routes.`);
   await pool.end();
 })().catch(e => { console.error(e); process.exit(1); });

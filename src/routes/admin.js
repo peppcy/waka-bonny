@@ -128,11 +128,35 @@ router.put('/fares', wrap(async (req, res) => {
 }));
 
 // ---- Zones ----
-router.get('/zones', wrap(async (req, res) => res.json({ zones: (await q('SELECT * FROM zones ORDER BY sort, name')).rows })));
+router.get('/zones', wrap(async (req, res) => {
+  const zones = (await q(`SELECT z.*, (SELECT count(*) FROM fares f WHERE (f.zone_a=z.id OR f.zone_b=z.id) AND f.amount IS NOT NULL)::int AS fares_set
+    FROM zones z ORDER BY z.active DESC, z.sort, z.name`)).rows;
+  const last = (await q(`SELECT value FROM settings WHERE key='last_zone_sync'`)).rows[0];
+  res.json({ zones, hale: !!process.env.HALE_API_URL, last_sync: last ? JSON.parse(last.value) : null });
+}));
+router.post('/zones/sync', wrap(async (req, res) => {
+  if (!process.env.HALE_API_URL) throw bad('HALE_API_URL is not set, so there is nothing to sync from.');
+  const { syncZones } = require('../lib/zonesync');
+  try { res.json(await syncZones()); } catch (e) { throw bad('Sync failed: ' + e.message); }
+}));
+// Copy fares from one area to another (e.g. "Akiama" renamed to "Akiama Junction"); only fills fares not yet set
+router.post('/zones/:id/copy-fares', wrap(async (req, res) => {
+  const to = int(req.params.id), from = int(req.body?.from_zone);
+  if (!to || !from || to === from) throw bad('Choose the area to copy fares from.');
+  const r = await q(`WITH src AS (
+      SELECT CASE WHEN f.zone_a=$1 THEN f.zone_b ELSE f.zone_a END AS other, f.vehicle_type, f.amount
+      FROM fares f WHERE (f.zone_a=$1 OR f.zone_b=$1) AND f.amount IS NOT NULL)
+    UPDATE fares t SET amount = src.amount FROM src
+    WHERE t.vehicle_type = src.vehicle_type AND t.amount IS NULL
+      AND t.zone_a = LEAST($2::int, CASE WHEN src.other=$1 THEN $2 ELSE src.other END)
+      AND t.zone_b = GREATEST($2::int, CASE WHEN src.other=$1 THEN $2 ELSE src.other END)
+    RETURNING t.zone_a`, [from, to]);
+  res.json({ ok: true, copied: r.rowCount });
+}));
 router.post('/zones', wrap(async (req, res) => {
   const name = clean(req.body?.name, 60);
   if (!name) throw bad('Enter a neighbourhood name.');
-  const z = (await q(`INSERT INTO zones(name, sort) VALUES($1, (SELECT COALESCE(max(sort),0)+1 FROM zones))
+  const z = (await q(`INSERT INTO zones(name, sort, source) VALUES($1, (SELECT COALESCE(max(sort),0)+1 FROM zones), 'manual')
       ON CONFLICT (name) DO UPDATE SET active=true RETURNING id`, [name])).rows[0];
   await q(`INSERT INTO fares(zone_a, zone_b, vehicle_type, amount)
       SELECT LEAST($1::int, z.id), GREATEST($1::int, z.id), t.v, NULL FROM zones z CROSS JOIN (VALUES ('keke'),('okada'),('taxi')) t(v)

@@ -52,4 +52,12 @@ app.use((err, req, res, next) => {
   await q(fs.readFileSync(path.join(__dirname, '..', 'db', 'schema.sql'), 'utf8'));
   const port = process.env.PORT || 3000;
   app.listen(port, () => console.log(`Waka Bonny running on :${port}`));
+  // Pick up neighbourhood changes made in Hale without a redeploy
+  if (process.env.HALE_API_URL) {
+    const { syncZones } = require('./lib/zonesync');
+    const run = () => syncZones().then(r => { if (r.added.length || r.hidden.length || r.reactivated.length) console.log('Areas synced from Hale:', JSON.stringify(r)); })
+      .catch(e => console.warn('Area sync from Hale failed:', e.message));
+    setTimeout(run, 15000);
+    setInterval(run, 30 * 60 * 1000);
+  }
 })().catch(e => { console.error('Startup failed:', e); process.exit(1); });

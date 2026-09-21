@@ -66,6 +66,84 @@ async function act(btn, fn) { busy(btn, true); try { await fn(); } catch (e) { f
 
 const zoneOptions = (sel, placeholder = 'Choose area') =>
   `<option value="">${placeholder}</option>` + S.meta.zones.map(z => `<option value="${z.id}" ${String(z.id) === String(sel) ? 'selected' : ''}>${esc(z.name)}</option>`).join('');
+// ---------- Area search field (type to search, tap a suggestion) ----------
+// Renders a text box plus a hidden input holding the area id, so code can read $('#id').value
+// and listen with $('#id').onchange exactly as with a <select>.
+const normArea = (t) => String(t || '').toLowerCase().replace(/[.,'’\-]/g, ' ').replace(/\s+/g, ' ').trim();
+function zoneField(id, sel, name = '', placeholder = 'Start typing an area…') {
+  const z = S.meta.zones.find(x => String(x.id) === String(sel));
+  return `<div class="zp"><input type="text" class="zp-in" data-for="${id}" value="${esc(z ? z.name : '')}" placeholder="${esc(placeholder)}"
+      autocomplete="off" autocapitalize="words" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}-list">
+    <input type="hidden" id="${id}" ${name ? `name="${name}"` : ''} value="${z ? z.id : ''}">
+    <div class="zp-list" id="${id}-list" role="listbox" hidden></div></div>`;
+}
+function matchAreas(text) {
+  const qn = normArea(text); if (!qn) return [];
+  const words = qn.split(' ');
+  return S.meta.zones.map(z => {
+    const n = normArea(z.name);
+    if (!words.every(w => n.includes(w))) return null;
+    const score = n.startsWith(qn) ? 0 : n.split(' ').some(w => w.startsWith(words[0])) ? 1 : 2;
+    return { z, score };
+  }).filter(Boolean).sort((a, b) => a.score - b.score || a.z.name.localeCompare(b.z.name)).slice(0, 8).map(x => x.z);
+}
+function zpSet(inp, z) {
+  const hid = document.getElementById(inp.dataset.for);
+  const changed = hid.value !== (z ? String(z.id) : '');
+  hid.value = z ? z.id : ''; inp.value = z ? z.name : inp.value;
+  inp.classList.toggle('zp-bad', !z && !!inp.value.trim());
+  if (changed) hid.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function zpShow(inp) {
+  const list = document.getElementById(inp.dataset.for + '-list');
+  const items = matchAreas(inp.value);
+  inp._items = items; inp._hi = 0;
+  if (!inp.value.trim()) { list.hidden = true; inp.setAttribute('aria-expanded', 'false'); return; }
+  const hl = (name) => { let out = esc(name); normArea(inp.value).split(' ').filter(Boolean).forEach(w => { out = out.replace(new RegExp('(' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'i'), '<b>$1</b>'); }); return out; };
+  list.innerHTML = items.length
+    ? items.map((z, i) => `<div class="zp-opt${i === 0 ? ' on' : ''}" role="option" data-zid="${z.id}" aria-selected="${i === 0}">${hl(z.name)}</div>`).join('')
+    : '<div class="zp-none">No matching area. Check the spelling, or pick the nearest area.</div>';
+  list.hidden = false; inp.setAttribute('aria-expanded', 'true');
+}
+function zpHide(inp) { const l = document.getElementById(inp.dataset.for + '-list'); if (l) l.hidden = true; inp.setAttribute('aria-expanded', 'false'); }
+// On phones, lift the field to the top so the keyboard doesn't cover the suggestions
+document.addEventListener('focusin', (e) => {
+  const inp = e.target.closest && e.target.closest('.zp-in'); if (!inp || window.innerWidth > 760) return;
+  setTimeout(() => { if (document.activeElement !== inp) return; const y = inp.getBoundingClientRect().top + window.scrollY - 80; window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' }); }, 300);
+});
+document.addEventListener('input', (e) => { const inp = e.target.closest('.zp-in'); if (!inp) return; inp.classList.remove('zp-bad'); zpShow(inp); });
+document.addEventListener('keydown', (e) => {
+  const inp = e.target.closest('.zp-in'); if (!inp) return;
+  const list = document.getElementById(inp.dataset.for + '-list'); const items = inp._items || [];
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (list.hidden) zpShow(inp); if (!items.length) return;
+    e.preventDefault(); inp._hi = (inp._hi + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length;
+    [...list.children].forEach((c, i) => { c.classList.toggle('on', i === inp._hi); c.setAttribute('aria-selected', i === inp._hi); });
+  } else if (e.key === 'Enter') {
+    if (!list.hidden && items.length) { e.preventDefault(); zpSet(inp, items[inp._hi || 0]); zpHide(inp); }
+  } else if (e.key === 'Escape') zpHide(inp);
+});
+// Keep focus in the text box while a suggestion is pressed, then pick it on click.
+// Selecting on click (not on press) stops the tap "falling through" to a button under the list.
+document.addEventListener('pointerdown', (e) => { if (e.target.closest('.zp-list')) e.preventDefault(); });
+document.addEventListener('click', (e) => {
+  const opt = e.target.closest('.zp-opt'); if (!opt) return;
+  e.preventDefault(); e.stopPropagation();
+  const inp = opt.closest('.zp').querySelector('.zp-in');
+  zpSet(inp, S.meta.zones.find(z => String(z.id) === opt.dataset.zid)); zpHide(inp);
+}, true);
+document.addEventListener('focusout', (e) => {
+  const inp = e.target.closest && e.target.closest('.zp-in'); if (!inp) return;
+  setTimeout(() => {
+    zpHide(inp);
+    const t = normArea(inp.value);
+    const exact = S.meta.zones.find(z => normArea(z.name) === t);
+    const only = !exact && t && matchAreas(inp.value).length === 1 ? matchAreas(inp.value)[0] : null;
+    zpSet(inp, exact || only || null);
+    if (!t) inp.classList.remove('zp-bad');
+  }, 120);
+});
+
 const saveForm = () => localStorage.setItem('waka_form', JSON.stringify(S.form));
 
 // ---------- view cleanup (maps, GPS watchers, timers) ----------
@@ -431,9 +509,9 @@ function renderRideForm() {
     <div class="card">
       ${svc === 'errand' ? `<label class="field"><span class="label">What should the rider buy or do?</span><textarea id="item" maxlength="300" placeholder="e.g. Buy 2 bags of pure water and a loaf of bread">${esc(f.item || '')}</textarea></label>
         <label class="field"><span class="label">Estimated cost of items (₦, optional)</span><input id="cost" type="number" min="0" step="50" inputmode="numeric" value="${esc(f.cost || '')}"></label>` : ''}
-      <label class="field"><span class="label">${txt[1]}</span><select id="from">${zoneOptions(f.from)}</select></label>
+      <label class="field"><span class="label">${txt[1]}</span>${zoneField('from', f.from)}</label>
       <label class="field"><span class="label">${txt[2]}</span><input id="pickup" value="${esc(f.pickup || '')}" placeholder="${svc === 'errand' ? 'e.g. Bonny main market' : 'e.g. Opposite the church gate'}"></label>
-      <label class="field"><span class="label">${txt[3]}</span><select id="to">${zoneOptions(f.to)}</select></label>
+      <label class="field"><span class="label">${txt[3]}</span>${zoneField('to', f.to)}</label>
       <label class="field"><span class="label">${txt[4]}</span><input id="dropoff" value="${esc(f.dropoff || '')}"></label>
       ${svc === 'parcel' ? `<label class="field"><span class="label">What are you sending?</span><input id="item" maxlength="300" value="${esc(f.item || '')}" placeholder="e.g. Small shoe box, documents"></label>
         <div class="row"><label class="field"><span class="label">Recipient's name</span><input id="recName" value="${esc(f.recName || '')}"></label>
@@ -734,8 +812,8 @@ async function viewBadge(codeValue) {
       <dl class="kv"><dt>Vehicle</dt><dd>${VEH_ICON[d.vehicle_type]} ${esc(d.vehicle_desc || VEH[d.vehicle_type])}</dd><dt>Plate</dt><dd>${esc(d.plate)}</dd><dt>Permit</dt><dd>${esc(d.permit_no)}</dd></dl></div>
     ${ok && island ? (S.user && S.user.role === 'passenger' ? `
       <div class="card"><h3>Record this trip</h3><p class="muted small">Your trip will be logged with this driver, and you can share it and use SOS.</p>
-        <label class="field"><span class="label">Where are you now?</span><select id="hf">${zoneOptions(f.from)}</select></label>
-        <label class="field"><span class="label">Where are you going?</span><select id="ht">${zoneOptions(f.to)}</select></label>
+        <label class="field"><span class="label">Where are you now?</span>${zoneField('hf', f.from)}</label>
+        <label class="field"><span class="label">Where are you going?</span>${zoneField('ht', f.to)}</label>
         <button class="btn" id="hail">Start recorded trip</button></div>` :
       S.user ? '' : `<button class="btn" id="signin">Sign in to record this trip</button>`) : ''}
     <button class="btn ghost" id="back">Back</button>`;
@@ -1016,7 +1094,7 @@ async function viewIslandDriver(d) {
     ${subCard(sub)}
     <div class="toggle ${d.online ? 'on' : 'off'}"><span>${d.online ? "You're online" : "You're offline"}</span>
       <button class="switch" role="switch" aria-checked="${d.online}" aria-label="Online" id="onl"></button></div>
-    <label class="field"><span class="label">Area you're in now</span><select id="zone">${zoneOptions(d.zone_id)}</select></label>
+    <label class="field"><span class="label">Area you're in now</span>${zoneField('zone', d.zone_id)}</label>
     <div class="stats"><div class="stat"><b>${naira(sum.earnings)}</b><span>Fares today</span></div><div class="stat"><b>${sum.trips}</b><span>Jobs today</span></div>
       <div class="stat"><b>${sum.rating ?? '—'}</b><span>Your rating</span></div>${sum.owed ? `<div class="stat"><b>${naira(sum.owed)}</b><span>Paid online, due to you</span></div>` : ''}
       ${sum.owes_depots ? `<div class="stat"><b>${naira(sum.owes_depots)}</b><span>Charges to hand to depot</span></div>` : ''}</div>
@@ -1268,7 +1346,7 @@ function handoverSheet(p, done) {
 
 function bookDeliverySheet(p, done) {
   sheet(`<h3>Deliver ${esc(p.ref)} to ${esc(p.recipient_name)}</h3>
-    <label class="field"><span class="label">Delivery area</span><select id="bz">${zoneOptions(p.zone_id)}</select></label>
+    <label class="field"><span class="label">Delivery area</span>${zoneField('bz', p.zone_id)}</label>
     <label class="field"><span class="label">Address or landmark</span><input id="ba" value="${esc(p.address || '')}"></label>
     <label class="field"><span class="label">Delivery fee (₦, leave empty to use the fare table)</span><input id="bf" inputmode="numeric"></label>
     <button class="btn" id="bgo">Add to deliveries</button><button class="link" id="closeS">Cancel</button>`);
@@ -1406,7 +1484,7 @@ async function viewPackage(tok) {
         <div class="card"><h3>Collect at the depot</h3><p class="small"><b>${esc(p.depot.name)}</b><br>${esc(p.depot.address || '')}</p>
           <p class="small">Pay <b>${naira(p.charge)}</b> there and show your code.</p>${p.depot.phone ? `<a class="btn ghost sm" href="tel:+${esc(p.depot.phone)}">Call the depot</a>` : ''}</div>
         <form id="dv" class="card"><h3>Or get it delivered</h3>
-          <label class="field"><span class="label">Your area</span><select name="zone_id" id="dz">${zoneOptions(p.zone_id)}</select></label>
+          <label class="field"><span class="label">Your area</span>${zoneField('dz', p.zone_id, 'zone_id')}</label>
           <label class="field"><span class="label">Street, house or landmark</span><input name="address" value="${esc(p.address || '')}" required></label>
           <label class="small"><input type="checkbox" id="useLoc" checked style="width:auto;min-height:0"> Share my location so the rider finds me</label>
           <p id="dq" class="small"></p>
@@ -1450,7 +1528,7 @@ async function adDepots(el) {
   const { depots } = await api('/admin/depots');
   el.innerHTML = `<form id="dpf" class="card"><h3>Add a depot</h3>
       <div class="row"><label class="field"><span class="label">Name</span><input name="name" placeholder="e.g. Jetty Cargo Depot" required></label>
-        <label class="field"><span class="label">Area</span><select name="zone_id" required>${zoneOptions('')}</select></label></div>
+        <label class="field"><span class="label">Area</span>${zoneField('dpz', '', 'zone_id')}</label></div>
       <div class="row"><label class="field"><span class="label">Address</span><input name="address"></label><label class="field"><span class="label">Depot phone</span><input name="phone" type="tel"></label></div>
       <div class="row" style="align-items:end"><label class="field"><span class="label">Latitude</span><input name="lat" inputmode="decimal"></label><label class="field"><span class="label">Longitude</span><input name="lng" inputmode="decimal"></label>
         <button type="button" class="btn ghost" id="here" style="flex:0 0 auto;width:auto">Use my location</button></div>
@@ -1539,7 +1617,7 @@ async function adDrivers(el) {
 
 async function adFares(el) {
   S.fareType = S.fareType || 'keke';
-  const { zones } = await api('/admin/zones');
+  const { zones, hale, last_sync: ls } = await api('/admin/zones');
   const active = zones.filter(z => z.active);
   S.fareZone = S.fareZone || active[0]?.id;
   const { fares } = S.fareZone ? await api(`/admin/fares?vehicle_type=${S.fareType}&zone=${S.fareZone}`) : { fares: [] };
@@ -1547,18 +1625,36 @@ async function adFares(el) {
   el.innerHTML = `
     <p class="muted">Fares are fixed per area pair and work in both directions. Leave a box empty to keep it as a placeholder: passengers can't book that route until it has a price.</p>
     <div class="row"><label class="field"><span class="label">Vehicle</span><select id="ft">${['keke', 'okada', 'taxi'].map(t => `<option value="${t}" ${S.fareType === t ? 'selected' : ''}>${VEH[t]}</option>`).join('')}</select></label>
-      <label class="field"><span class="label">From area</span><select id="fz">${active.map(z => `<option value="${z.id}" ${+S.fareZone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select></label></div>
+      <label class="field"><span class="label">From area</span>${zoneField('fz', S.fareZone)}</label></div>
     <div class="table-wrap"><table><thead><tr><th>${esc(zName)} to / from</th><th>${VEH[S.fareType]} fare (₦)</th></tr></thead><tbody>
       ${fares.map(f => `<tr><td>${f.other_id === +S.fareZone ? 'Within ' + esc(zName) : esc(f.other_name)}</td>
         <td><input type="number" min="0" step="50" inputmode="numeric" data-a="${f.zone_a}" data-b="${f.zone_b}" value="${f.amount ?? ''}" placeholder="Not set"></td></tr>`).join('')}
     </tbody></table></div>
     <button class="btn" id="saveF">Save ${VEH[S.fareType].toLowerCase()} fares</button>
     <h2>Areas</h2>
-    <p class="muted small">Each neighbourhood is a fare zone. Add missing ones here or hide ones you don't serve.</p>
-    <div class="list">${zones.map(z => `<div class="item"><span>${esc(z.name)}</span><button class="btn ghost sm" data-zt="${z.id}">${z.active ? 'Hide' : 'Show'}</button></div>`).join('')}</div>
+    ${hale ? `<div class="card"><div class="row" style="align-items:center"><div><h3>Synced with Hale</h3>
+        <p class="small muted">Areas follow Hale's neighbourhood list automatically every 30 minutes.${ls ? ` Last sync ${fmtTime(ls.at)}${ls.added && ls.added.length ? `: added ${esc(ls.added.join(', '))}` : ''}${ls.hidden && ls.hidden.length ? `; hidden ${esc(ls.hidden.join(', '))}` : ''}.` : ''}</p></div>
+        <button class="btn sm" id="syncH" style="flex:0 0 auto">Sync from Hale now</button></div></div>` : ''}
+    <p class="muted small">Each neighbourhood is a fare zone. New areas start with no fares: set them above, or copy them from a similar area (for example from an old name after a rename).</p>
+    <div class="list">${zones.map(z => `<div class="item"><span>${esc(z.name)} ${z.active ? '' : '<span class="tag">hidden</span>'} ${z.source === 'manual' ? '<span class="tag">added here</span>' : ''}
+        <br><span class="small ${z.fares_set ? 'muted' : 'stale'}">${z.fares_set ? z.fares_set + ' fare(s) set' : 'No fares set yet'}</span></span>
+      <span class="acts">${z.active ? `<button class="btn ghost sm" data-cf="${z.id}" data-nm="${esc(z.name)}">Copy fares from…</button>` : ''}<button class="btn ghost sm" data-zt="${z.id}">${z.active ? 'Hide' : 'Show'}</button></span></div>`).join('')}</div>
     <form id="addZ" class="row"><input name="name" placeholder="New neighbourhood name" required><button class="btn" style="flex:0 0 auto;width:auto" type="submit">Add area</button></form>`;
   $('#ft').onchange = (e) => { S.fareType = e.target.value; adFares(el).catch(fail); };
-  $('#fz').onchange = (e) => { S.fareZone = +e.target.value; adFares(el).catch(fail); };
+  $('#fz').onchange = (e) => { if (e.target.value) { S.fareZone = +e.target.value; adFares(el).catch(fail); } };
+  if ($('#syncH')) $('#syncH').onclick = (e) => act(e.target, async () => {
+    const r = await api('/admin/zones/sync', { method: 'POST' }); await loadMeta();
+    toast(`Synced ${r.total} areas from Hale.${r.added.length ? ' Added: ' + r.added.join(', ') + '.' : ''}${r.hidden.length ? ' Hidden: ' + r.hidden.join(', ') + '.' : ''}`); adFares(el);
+  });
+  $$('[data-cf]', el).forEach(b => b.onclick = () => {
+    sheet(`<h3>Copy fares into ${esc(b.dataset.nm)}</h3>
+      <p class="muted small">Copies every keke, okada and taxi fare from another area (including hidden ones, e.g. an old name). Fares already set for ${esc(b.dataset.nm)} are kept.</p>
+      <label class="field"><span class="label">Copy from</span><select id="cfFrom">${zones.filter(z => z.id !== +b.dataset.cf && z.fares_set).map(z => `<option value="${z.id}">${esc(z.name)}${z.active ? '' : ' (hidden)'} · ${z.fares_set} fares</option>`).join('')}</select></label>
+      <button class="btn" id="cfGo">Copy fares</button><button class="link" id="closeS">Cancel</button>`);
+    $('#closeS').onclick = closeSheet;
+    if (!$('#cfFrom').options.length) { $('#cfGo').disabled = true; $('#cfFrom').outerHTML = '<p class="muted small">No other area has fares yet.</p>'; return; }
+    $('#cfGo').onclick = (e) => act(e.target, async () => { const r = await api(`/admin/zones/${b.dataset.cf}/copy-fares`, { method: 'POST', body: { from_zone: $('#cfFrom').value } }); closeSheet(); toast(`${r.copied} fare(s) copied.`); adFares(el); });
+  });
   $('#saveF').onclick = (e) => act(e.target, async () => {
     const items = $$('input[data-a]', el).map(i => ({ zone_a: +i.dataset.a, zone_b: +i.dataset.b, amount: i.value }));
     await api('/admin/fares', { method: 'PUT', body: { vehicle_type: S.fareType, items } }); toast('Fares saved.');

@@ -293,3 +293,6 @@ CREATE TABLE IF NOT EXISTS packages (
 CREATE INDEX IF NOT EXISTS packages_depot_idx ON packages(depot_id, status);
 CREATE INDEX IF NOT EXISTS packages_phone_idx ON packages(recipient_phone);
 CREATE INDEX IF NOT EXISTS packages_run_idx ON packages(run_id);
+
+-- Areas synced from Hale vs added by hand in the Desk (manual ones are never hidden by a sync)
+ALTER TABLE zones ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'hale';
