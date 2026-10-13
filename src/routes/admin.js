@@ -4,6 +4,8 @@ const { q } = require('../lib/db');
 const { auth } = require('../lib/auth');
 const { wrap, bad, int, clean, normalizePhone, HttpError } = require('../lib/util');
 const { extendWeeks, subSettings, startSubscriptionsForAll } = require('../lib/subs');
+const { splitSettings, resyncAll } = require('../lib/split');
+const { sendSms } = require('../lib/sms');
 
 router.use(auth('admin'));
 
@@ -196,9 +198,14 @@ router.get('/payouts', wrap(async (req, res) => {
     FROM rides r JOIN users u ON u.id=r.driver_id JOIN drivers d ON d.user_id=u.id
     WHERE r.pay_method='paystack' AND r.payout_at IS NULL
     GROUP BY u.id, u.name, u.phone, d.plate, d.vehicle_type, d.bank_name, d.account_number, d.account_name, d.account_verified ORDER BY amount DESC`)).rows;
-  const recent = (await q(`SELECT p.ref, p.kind, p.amount, p.status, p.channel, p.paid_at, p.created_at, u.name, u.phone
-    FROM payments p JOIN users u ON u.id=p.user_id ORDER BY p.id DESC LIMIT 50`)).rows;
-  res.json({ owed: rows, payments: recent });
+  const recent = (await q(`SELECT p.ref, p.kind, p.amount, p.status, p.channel, p.paid_at, p.created_at, p.subaccount_code, p.commission,
+      u.name, u.phone, du.name AS driver_name
+    FROM payments p JOIN users u ON u.id=p.user_id LEFT JOIN users du ON du.id=p.driver_id ORDER BY p.id DESC LIMIT 50`)).rows;
+  const split = await splitSettings();
+  const drivers = (await q(`SELECT count(*) FILTER (WHERE status='approved')::int AS approved,
+      count(*) FILTER (WHERE status='approved' AND subaccount_code IS NOT NULL)::int AS with_split,
+      count(*) FILTER (WHERE status='approved' AND account_number IS NULL)::int AS no_bank FROM drivers`)).rows[0];
+  res.json({ owed: rows, payments: recent, split: { ...split, enabled: !!process.env.PAYSTACK_SECRET_KEY }, drivers });
 }));
 router.post('/payouts/:driverId', wrap(async (req, res) => {
   const r = (await q(`UPDATE rides SET payout_at=now() WHERE driver_id=$1 AND pay_method='paystack' AND payout_at IS NULL RETURNING fare`, [int(req.params.driverId)])).rows;
@@ -247,7 +254,7 @@ router.delete('/depots/:id/agents/:uid', wrap(async (req, res) => {
 }));
 
 // ---- Settings ----
-const EDITABLE = ['night_start_hour', 'night_end_hour', 'night_surcharge', 'intercity_open_hour', 'intercity_close_hour', 'safety_desk_phone', 'weekly_subscription', 'subscription_trial_days', 'parcel_fee', 'errand_fee', 'subscription_mode', 'campaign_end'];
+const EDITABLE = ['night_start_hour', 'night_end_hour', 'night_surcharge', 'intercity_open_hour', 'intercity_close_hour', 'safety_desk_phone', 'weekly_subscription', 'subscription_trial_days', 'parcel_fee', 'errand_fee', 'subscription_mode', 'campaign_end', 'platform_commission_pct', 'paystack_fee_bearer'];
 router.get('/settings', wrap(async (req, res) => {
   const rows = (await q('SELECT key, value FROM settings')).rows;
   res.json({ settings: Object.fromEntries(rows.map(r => [r.key, r.value])) });
@@ -259,6 +266,12 @@ router.put('/settings', wrap(async (req, res) => {
     if (!(amt > 0)) throw bad('Set the weekly subscription amount before switching subscriptions on.');
   }
   if ('subscription_mode' in (req.body || {}) && !['free', 'on'].includes(req.body.subscription_mode)) throw bad('Invalid subscription mode.');
+  const beforeSplit = await splitSettings();
+  if ('platform_commission_pct' in (req.body || {})) {
+    const pct = req.body.platform_commission_pct === '' || req.body.platform_commission_pct == null ? 0 : Number(req.body.platform_commission_pct);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 50) throw bad('Commission must be between 0 and 50 percent.');
+  }
+  if ('paystack_fee_bearer' in (req.body || {}) && !['driver', 'platform'].includes(req.body.paystack_fee_bearer)) throw bad('Choose who pays the Paystack fee.');
   for (const k of EDITABLE) {
     if (k in (req.body || {})) {
       const v = req.body[k] === '' || req.body[k] == null ? null : String(req.body[k]).slice(0, 40);
@@ -267,7 +280,11 @@ router.put('/settings', wrap(async (req, res) => {
   }
   let trialsStarted = 0;
   if (before.mode !== 'on' && req.body?.subscription_mode === 'on') trialsStarted = await startSubscriptionsForAll();
-  res.json({ ok: true, trials_started: trialsStarted });
+  // A new commission has to be pushed to every driver's Paystack subaccount
+  let resynced = null;
+  const afterSplit = await splitSettings();
+  if (afterSplit.pct !== beforeSplit.pct) resynced = await resyncAll();
+  res.json({ ok: true, trials_started: trialsStarted, resynced });
 }));
 
 module.exports = router;

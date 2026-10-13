@@ -27,6 +27,7 @@ app.use('/api/rides', require('./routes/rides'));
 app.use('/api/driver', require('./routes/driver'));
 app.use('/api/intercity', require('./routes/intercity'));
 app.use('/api/admin/users', require('./routes/users-admin'));
+app.use('/api/admin/broadcast', require('./routes/broadcast'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/pay', require('./routes/pay'));
 app.use('/api/depot', require('./routes/depot'));

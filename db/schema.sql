@@ -296,3 +296,25 @@ CREATE INDEX IF NOT EXISTS packages_run_idx ON packages(run_id);
 
 -- Areas synced from Hale vs added by hand in the Desk (manual ones are never hidden by a sync)
 ALTER TABLE zones ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'hale';
+
+-- ===== Paystack split payments: the driver's share goes straight to their bank =====
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS subaccount_code TEXT;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS subaccount_pct NUMERIC;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS subaccount_at TIMESTAMPTZ;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS driver_id INT REFERENCES users(id);
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS subaccount_code TEXT;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS commission INT;
+
+-- ===== Messages sent to drivers, agents or customers from the Desk =====
+CREATE TABLE IF NOT EXISTS broadcasts (
+  id SERIAL PRIMARY KEY,
+  admin_id INT REFERENCES users(id),
+  audience TEXT NOT NULL,
+  message TEXT NOT NULL,
+  recipients INT NOT NULL DEFAULT 0,
+  sent INT NOT NULL DEFAULT 0,
+  failed INT NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'sending' CHECK (status IN ('sending','done','failed')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at TIMESTAMPTZ
+);

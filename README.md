@@ -37,7 +37,7 @@ Stack: Node.js / Express / PostgreSQL. The frontend is plain HTML/JS in `public/
 
 ## Before you launch: replace the placeholders
 
-1. **Neighbourhoods**: set `HALE_API_URL` (your Hale API base URL) and `HALE_CITY=Bonny`, then run `npm run seed`. Zones are imported from Hale's `/api/neighbourhoods`. Re-run the seed whenever you add neighbourhoods in Hale; existing zones and fares are kept. Without `HALE_API_URL`, `config/neighbourhoods.js` is used.
+1. **Neighbourhoods**: set `HALE_API_URL`, `HALE_NEIGHBOURHOODS_PATH=/api/v1/neighbourhoods` and `HALE_CITY=Bonny`. Areas sync from Hale at every deploy, automatically every 30 minutes, and on demand (Desk → Fares & areas → **Sync from Hale now**). New Hale neighbourhoods appear; ones removed or renamed in Hale are hidden (their past trips and fares are kept). Areas you add by hand in the Desk are never hidden by a sync. After a rename, use **Copy fares from…** to carry the old area's prices over. A sync that returns fewer than 3 neighbourhoods is refused, so a Hale glitch can't wipe your areas.
 2. **Fares**: all island fares start empty. Set them in Desk → Fares & areas.
 3. **Intercity prices**: set bus and Sienna seat prices in Desk → Bonny ⇄ PH. Drivers can't publish departures until their price is set.
 4. **Road hours**: defaults to 7:00–19:00. Change or clear in Desk → Settings.
@@ -120,12 +120,37 @@ The Book tab has three services: Ride, Parcel and Errand. They use the same ride
 - Fares paid online go to the platform's Paystack account. Desk → **Payments** shows what each driver is owed; pay them and click **Mark paid out**.
 - Set `PAYSTACK_SECRET_KEY`, and in the Paystack dashboard (Settings → API Keys & Webhooks) set the **Webhook URL** to `https://YOUR-DOMAIN/api/pay/webhook`. The webhook confirms payments even if the customer closes the page, and processes weekly subscription charges. All webhooks are signature-checked.
 
-## Weekly driver subscriptions
+## Driver fees: launch campaign, then weekly subscriptions
 
-- Turned on by setting **Weekly subscription (₦)** in Desk → Settings (empty or 0 = off). New drivers get a free trial (default 7 days).
-- Drivers pay on their Work screen: **Pay weekly automatically** (Paystack charges their card every week) or **Pay 1 week** (any channel). They can stop automatic payment at any time.
-- Expired drivers can't go online, accept jobs or publish departures.
-- Cash paid at the association desk: Desk → Drivers → **+1 week (cash)**.
+- **Launch campaign (default)**: Desk → Settings → Driver fees → Mode = *Launch campaign: free for all drivers*. Drivers and vehicle owners sign up, go online and take jobs without paying anything. Drivers see a "Free during our launch campaign" card (with an end date if you set one).
+- **Switching on weekly subscriptions later**: set the weekly amount and free-trial days, then change Mode to *Weekly subscription*. Every driver gets the free-trial days counted from the day you switch, so nobody is locked out suddenly. After that, Paystack charges drivers automatically each week (or they pay one week at a time); expired drivers can't go online. Cash paid at the desk: Drivers → **+1 week (cash)**.
+- You can switch back to the campaign at any time.
+
+## Online fares: split payments
+
+When a customer pays a fare online, Paystack divides the money **as the payment happens**: your commission goes to Cylan Metro and the rest settles straight to the driver's own bank account. There is no manual payout, and none of the driver's money sits in your account.
+
+- Every driver with a **verified bank account** automatically gets a Paystack subaccount. Adding or changing their bank account updates it.
+- Desk → Settings → **Online payments**: set your commission (0–50%) and choose whether **Paystack's own fee** comes out of the driver's share or Cylan Metro's. Changing the commission updates every driver's subaccount at once.
+- During the launch campaign the commission is **0%**, so drivers keep the full fare, and the fee comes out of the driver's share (the platform takes nothing, so it pays nothing).
+- Drivers who have **not** added a bank account are paid the old way: the fare comes to you and appears under Desk → Payments as owed, to pay by transfer and mark off. The Payments tab shows how many drivers are still in that position.
+- Weekly subscriptions are never split: they belong entirely to the platform.
+- Deleting a driver switches their subaccount off, so nothing can settle to them afterwards.
+
+## Messaging drivers and customers
+
+Desk → **Messages** sends one SMS to a whole group: all drivers, approved drivers, drivers waiting for verification, drivers with no bank account, drivers whose subscription has expired, depot agents, customers, or everyone. Banned and deleted accounts are skipped.
+
+Before sending, the Desk shows the recipient count and how many SMS it will cost (160 plain characters per SMS; accents and emoji cut that to 70). Sending needs a confirmation, runs in the background, and the history shows how many were delivered.
+
+Use it to warn drivers before the launch campaign ends, to announce new areas or fares, or to tell agents about a change at the depot.
+
+## Driver bank accounts (pay by transfer)
+
+- Drivers add their bank and 10-digit account number on the Work screen (also while waiting for verification). Paystack checks it with the bank and saves the **real account name**; wrong numbers are refused. Without Paystack keys the driver types the name and it shows as *not verified*.
+- When a customer chooses **Transfer** after a trip, they see that driver's bank, account number and verified account name with a **Copy** button. Bus/Sienna passengers see the same under their booking. Details are only shown to that driver's own customers.
+- The same account appears in Desk → Drivers and Desk → Payments. It is also the account Paystack settles online fares to (see **split payments** above).
+- Sign-up records who owns the vehicle: the driver, or a named owner with their phone.
 
 ## Managing users (platform owner)
 
@@ -133,6 +158,34 @@ Desk → **Users**: every customer and driver, searchable by name or phone and f
 - **Ban**: requires a reason. The user is signed out at once, sees the reason when they try to use the app, and can't sign in. Pending trips are cancelled; a trip already under way is left to finish safely. **Unban** reverses it.
 - **Delete**: requires a reason and typing DELETE. Name, phone, PIN, emergency contact, landmarks and GPS history are erased; trip and payment records stay, anonymised, for your accounts. Pending trips, unpaid bookings and the driver's upcoming departures are cancelled, and an automatic Paystack subscription is stopped. Tick **block this phone number** to stop them signing up again (the number is stored only as a one-way hash).
 - Admin accounts can't be banned or deleted from the app. Every action is logged with the admin's name and the reason.
+
+## Depot deliveries (goods arriving for people on the island)
+
+For depots and logistics companies where goods arrive addressed to a person (name and phone on the package).
+
+**Setup (owner):** Desk → **Depots** → add the depot (name, area, address, phone; stand at the depot and tap *Use my location*). The depot staff member signs up in the app as a customer, then you add them as an **agent** by phone. Next time they open the app they see the Depot screen.
+
+**Agent, Register tab:** register each package (recipient name, phone, item, logistics charge), or paste a whole list, one per line: `Name, Phone, Item, Charge` (straight from Excel or WhatsApp). Each recipient immediately gets an SMS with their **4-digit code** and a link to their package page. Bad lines are reported, the rest are added.
+
+**Recipient (SMS link, no account needed):** sees the package, the charge and their code, and chooses:
+- **Collect at the depot**: show the code and pay the charge there, or
+- **Deliver to me**: pick their area and landmark (and optionally share their location). They see the delivery fee (the zone fare from the depot's area + the parcel fee) and the total to pay the rider.
+
+**Agent, Hand over tab:** search by name, phone or package ref; enter the recipient's code; record cash / transfer / already paid. If the SMS was lost, check a photo ID and write what was checked: it's recorded against the package. *Deliver* books delivery for someone who phoned in.
+
+**Agent, Deliveries tab:** tick the packages going the same way, choose okada / keke / taxi and **Create run**. Nearby drivers see "📦 Depot run: N packages, you earn ₦X", sorted by distance.
+
+**Driver:** accepts the run → goes to the depot → *I have all N packages* (recipients get an SMS that it's on the way, with a live tracking link) → at each stop, enters the recipient's code and records cash or transfer, or marks *Not delivered* with a reason → *Finish run*. The summary shows what they earned (the delivery fees) and the logistics charges to hand to the depot.
+
+**Agent, Runs tab:** confirms undelivered packages are back at the depot, and confirms the cash received from the driver.
+
+## Choosing an area
+
+Area fields are type-to-search, not dropdowns: users type a few letters ("aki", "shell", "tolofari") and tap one of the matching areas shown under the box. Arrow keys and Enter work on a keyboard; typing a full area name exactly and moving on also selects it. Text that matches no area is outlined in red.
+
+## Nearest driver first
+
+Ride, parcel and errand requests and depot runs are sorted by real distance from the driver's live GPS to the pickup point (or depot), shown as "📍 800 m away". If GPS isn't available, requests from the driver's chosen area come first. Drivers no longer need to keep updating the area dropdown.
 
 ## Not in this MVP (phase 2)
 

@@ -971,7 +971,7 @@ async function viewDriver() {
       suspended: ['Account suspended', `You have ${d.strikes} strike(s). Contact the association desk to discuss reinstatement.`] }[d.status];
     app.innerHTML = `<div class="card"><h2>${msg[0]}</h2><p class="muted">${msg[1]}</p>
       <dl class="kv"><dt>Vehicle</dt><dd>${VEH_ICON[d.vehicle_type]} ${VEH[d.vehicle_type]}</dd><dt>Plate</dt><dd>${esc(d.plate)}</dd><dt>Permit</dt><dd>${esc(d.permit_no)}</dd></dl></div>
-      ${d.status === 'pending' ? bankCard((await api('/driver/bank')).bank) : ''}
+      ${d.status === 'pending' ? (b => bankCard(b.bank, b.commission_pct))(await api('/driver/bank')) : ''}
       <button class="btn ghost" id="refresh">Check again</button>`;
     bindBank();
     $('#refresh').onclick = () => viewDriver().catch(fail);
@@ -997,13 +997,15 @@ function subCard(sub) {
     <p class="small muted">Paid until ${until}${sub.auto ? '. Renews automatically every week.' : '.'}</p>${btns}</div>`;
 }
 // Driver's bank account, shown to their customers who choose to pay by transfer
-function bankCard(bank) {
+function bankCard(bank, commissionPct) {
   if (!bank) return `<div class="card"><h3>🏦 Add your bank account</h3>
-    <p class="small muted">Customers who pay by transfer will see your account number, so the money goes straight to you. Online fares are also paid out here.</p>
+    <p class="small muted">Customers who pay by transfer will see your account number, so the money goes straight to you. Fares paid online in the app are sent to this account too.</p>
     <button class="btn sm" data-bank="edit">Add account number</button></div>`;
+  const keep = commissionPct > 0 ? `You keep ${100 - commissionPct}% of every online fare.` : 'You keep the full fare.';
   return `<div class="card"><div class="row" style="align-items:center"><h3>🏦 Your bank account</h3>
       <span class="tag ${bank.verified ? 'ok' : 'warn'}" style="flex:0 0 auto">${bank.verified ? '✔ Verified' : 'Not verified'}</span></div>
     <p class="small"><b>${esc(bank.account_name)}</b><br>${esc(bank.bank_name)} · ${esc(bank.account_number)}</p>
+    ${bank.split ? `<p class="notice small">💸 <b>Online fares come straight here.</b> When a customer pays in the app, your money is sent to this account automatically. ${keep}</p>` : ''}
     <div class="row"><button class="btn ghost sm" data-bank="edit">Change</button><button class="btn ghost sm" data-bank="remove">Remove</button></div></div>`;
 }
 function bindBank() {
@@ -1032,7 +1034,7 @@ async function bankSheet() {
     const body = Object.fromEntries(new FormData(e.target));
     if (verify) body.bank_name = e.target.bank_code.selectedOptions[0]?.textContent;
     const { bank: saved } = await api('/driver/bank', { method: 'PUT', body });
-    closeSheet(); toast(saved.verified ? `Verified: ${saved.account_name}` : 'Bank account saved.'); viewDriver();
+    closeSheet(); toast(saved.split ? `Verified: ${saved.account_name}. Online fares will come straight to this account.` : saved.verified ? `Verified: ${saved.account_name}` : 'Bank account saved.'); viewDriver();
   }); };
 }
 
@@ -1058,7 +1060,8 @@ function bindSub() {
 
 async function viewIslandDriver(d) {
   resetView();
-  const [sum, { ride }, sub, { bank }, { run }] = await Promise.all([api('/driver/summary'), api('/driver/active'), api('/driver/subscription'), api('/driver/bank'), api('/driver/run')]);
+  const [sum, { ride }, sub, bankInfo, { run }] = await Promise.all([api('/driver/summary'), api('/driver/active'), api('/driver/subscription'), api('/driver/bank'), api('/driver/run')]);
+  const { bank, commission_pct: commissionPct } = bankInfo;
   if (run) return renderRun(d, run, sum);
   // GPS: every 4s on a job (screen kept awake), every 15s while waiting online, off when offline
   if (ride) { GPS.start(4000); GPS.keepAwake(true); }
@@ -1108,7 +1111,7 @@ async function viewIslandDriver(d) {
       <div class="stat"><b>${sum.rating ?? '—'}</b><span>Your rating</span></div>${sum.owed ? `<div class="stat"><b>${naira(sum.owed)}</b><span>Paid online, due to you</span></div>` : ''}
       ${sum.owes_depots ? `<div class="stat"><b>${naira(sum.owes_depots)}</b><span>Charges to hand to depot</span></div>` : ''}</div>
     ${body}
-    ${ride ? '' : bankCard(bank)}
+    ${ride ? '' : bankCard(bank, commissionPct)}
     <button class="link" id="badge">Show my QR badge</button>`;
   bindSub(); bindBank();
   $('#onl').onclick = (e) => act(e.target, async () => { await api('/driver/online', { method: 'POST', body: { online: !d.online, zone_id: $('#zone').value } }); viewDriver(); });
@@ -1185,7 +1188,8 @@ function badgeSheet(d) {
 // ---------- bus / Sienna operator ----------
 async function viewOperator(d) {
   resetView();
-  const [{ routes }, { departures }, sub, { bank }] = await Promise.all([api('/intercity/routes'), api('/intercity/departures/mine'), api('/driver/subscription'), api('/driver/bank')]);
+  const [{ routes }, { departures }, sub, bankInfo] = await Promise.all([api('/intercity/routes'), api('/intercity/departures/mine'), api('/driver/subscription'), api('/driver/bank')]);
+  const { bank, commission_pct: commissionPct } = bankInfo;
   const onRoad = departures.some(x => ['boarding', 'departed'].includes(x.status));
   if (onRoad) { GPS.start(5000); GPS.keepAwake(true); } else GPS.stop();
   const cap = d.vehicle_type === 'bus' ? 18 : 7;
@@ -1193,7 +1197,7 @@ async function viewOperator(d) {
   app.innerHTML = `
     <h1>${VEH_ICON[d.vehicle_type]} Your departures</h1>
     ${subCard(sub)}
-    ${bankCard(bank)}
+    ${bankCard(bank, commissionPct)}
     ${onRoad ? '<div id="gpsNote" class="notice gps-note"></div><p class="muted small">Keep this screen open while driving so booked passengers can track the vehicle.</p>' : ''}
     <form id="newDep" class="card"><h3>Add a departure</h3>
       <label class="field"><span class="label">Route</span><select name="route_id" required>${routes.map(r => `<option value="${r.id}">${esc(r.origin)} to ${esc(r.destination)} (${naira(d.vehicle_type === 'bus' ? r.price_bus : r.price_sienna)})</option>`).join('')}</select></label>
@@ -1573,12 +1577,12 @@ async function adDepots(el) {
 }
 
 // ---------- admin desk ----------
-const ADMIN_TABS = [['overview', 'Overview'], ['users', 'Users'], ['drivers', 'Drivers'], ['fares', 'Fares & areas'], ['intercity', 'Bonny ⇄ PH'], ['depots', 'Depots'], ['payments', 'Payments'], ['safety', 'Safety'], ['settings', 'Settings']];
+const ADMIN_TABS = [['overview', 'Overview'], ['users', 'Users'], ['drivers', 'Drivers'], ['fares', 'Fares & areas'], ['intercity', 'Bonny ⇄ PH'], ['depots', 'Depots'], ['payments', 'Payments'], ['messages', 'Messages'], ['safety', 'Safety'], ['settings', 'Settings']];
 async function viewAdmin() {
   S.adminTab = S.adminTab || 'overview';
   app.innerHTML = `<div class="seg" role="tablist" style="overflow-x:auto">${ADMIN_TABS.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-pressed="${S.adminTab === k}">${l}</button>`).join('')}</div><div id="tab" class="list"></div>`;
   $$('[data-tab]').forEach(b => b.onclick = () => { S.adminTab = b.dataset.tab; stopPoll(); viewAdmin().catch(fail); });
-  const T = { overview: adOverview, users: adUsers, drivers: adDrivers, fares: adFares, intercity: adIntercity, depots: adDepots, payments: adPayments, safety: adSafety, settings: adSettings };
+  const T = { overview: adOverview, users: adUsers, drivers: adDrivers, fares: adFares, intercity: adIntercity, depots: adDepots, payments: adPayments, messages: adMessages, safety: adSafety, settings: adSettings };
   await T[S.adminTab]($('#tab'));
 }
 
@@ -1776,29 +1780,82 @@ async function userSheet(id, refresh) {
   $('#delGo').onclick = (e) => act(e.target, async () => {
     if (!reason()) throw new Error('Enter a reason for deleting this account.');
     const out = await api(`/admin/users/${u.id}/delete`, { method: 'POST', body: { reason: reason(), confirm: $('#delConfirm').value, block_phone: $('#blockNo').checked } });
-    toast('Account deleted.' + (out.paidSeats ? ` Note: ${out.paidSeats} paid seat booking(s) may need a refund.` : '') + (out.subCancelFailed ? ' Cancel their Paystack subscription manually.' : ''));
+    toast('Account deleted.' + (out.paidSeats ? ` Note: ${out.paidSeats} paid seat booking(s) may need a refund.` : '') + (out.subCancelFailed ? ' Cancel their Paystack subscription manually.' : '') + (out.subaccountFailed ? ' Switch off their Paystack subaccount manually.' : ''));
     closeSheet(); refresh();
   });
 }
 
 async function adPayments(el) {
-  const { owed, payments } = await api('/admin/payouts');
-  el.innerHTML = `<h2>Online fares owed to drivers</h2>
-    <p class="muted small">Passengers who paid by Paystack paid the platform, so each driver is owed those fares. Pay them (bank transfer), then mark as paid out.</p>
+  const { owed, payments, split, drivers } = await api('/admin/payouts');
+  const banner = !split.enabled
+    ? '<div class="notice warn">Paystack is not set up yet, so there are no online payments.</div>'
+    : `<div class="card"><h3>💸 Split payments ${drivers.with_split ? '<span class="tag ok">on</span>' : '<span class="tag warn">waiting for bank accounts</span>'}</h3>
+        <p class="small">Online fares are split by Paystack as the customer pays: your ${split.pct}% commission comes to you, the rest goes straight to the driver's bank. Paystack's fee comes out of ${split.bearer === 'platform' ? "Cylan Metro's share" : "the driver's share"}.</p>
+        <p class="small muted">${drivers.with_split} of ${drivers.approved} approved driver(s) are set up. ${drivers.no_bank ? `${drivers.no_bank} have not added a bank account yet — their online fares come to you and must be paid out by hand below.` : 'Everyone has added a bank account.'}</p></div>`;
+  el.innerHTML = `${banner}
+    <h2>Online fares owed to drivers</h2>
+    <p class="muted small">Fares paid online by a customer before that driver had a bank account. You received the money, so pay them by transfer and mark it below. Drivers with split payments never appear here.</p>
     <div class="table-wrap"><table><thead><tr><th>Driver</th><th>Vehicle</th><th>Jobs</th><th>Owed</th><th>Since</th><th></th></tr></thead><tbody>
     ${owed.map(o => `<tr><td><b>${esc(o.name)}</b><br><a href="tel:+${esc(o.phone)}">${esc(localPhone(o.phone))}</a></td><td>${VEH[o.vehicle_type]} ${esc(o.plate)}<br>${o.account_number ? `<span class="small">🏦 ${esc(o.bank_name)} ${esc(o.account_number)}<br>${esc(o.account_name)}${o.account_verified ? ' ✔' : ' (unverified)'}</span>` : '<span class="tag warn">No bank account</span>'}</td>
       <td>${o.trips}</td><td><b>${naira(o.amount)}</b></td><td>${fmtTime(o.since)}</td><td><button class="btn sm" data-po="${o.id}" data-amt="${o.amount}">Mark paid out</button></td></tr>`).join('')
       || '<tr><td colspan="6" class="muted">Nothing owed right now.</td></tr>'}</tbody></table></div>
     <h2>Recent payments</h2>
-    <div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>For</th><th>Amount</th><th>Status</th><th>Ref</th></tr></thead><tbody>
+    <div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>For</th><th>Amount</th><th>Split</th><th>Status</th><th>Ref</th></tr></thead><tbody>
     ${payments.map(p => `<tr><td>${fmtTime(p.paid_at || p.created_at)}</td><td>${esc(p.name)}</td>
       <td>${{ ride: 'Ride / delivery', seat: 'PH seats', sub_week: 'Subscription (1 week)', sub_auto: 'Subscription (auto)' }[p.kind]}</td>
-      <td>${naira(p.amount)}</td><td><span class="tag ${p.status === 'success' ? 'ok' : p.status === 'failed' ? 'bad' : ''}">${esc(p.status)}</span></td><td class="small">${esc(p.ref)}</td></tr>`).join('')
-      || '<tr><td colspan="6" class="muted">No payments yet.</td></tr>'}</tbody></table></div>`;
+      <td>${naira(p.amount)}</td>
+      <td class="small">${p.subaccount_code ? `<span class="tag ok">to driver</span>${p.commission ? `<br>you kept ${naira(p.commission)}` : ''}${p.driver_name ? `<br>${esc(p.driver_name)}` : ''}` : p.kind === 'ride' || p.kind === 'seat' ? '<span class="tag warn">to you</span>' : '—'}</td>
+      <td><span class="tag ${p.status === 'success' ? 'ok' : p.status === 'failed' ? 'bad' : ''}">${esc(p.status)}</span></td><td class="small">${esc(p.ref)}</td></tr>`).join('')
+      || '<tr><td colspan="7" class="muted">No payments yet.</td></tr>'}</tbody></table></div>`;
   $$('[data-po]', el).forEach(b => b.onclick = () => {
     if (!confirm(`Confirm you have paid ${naira(+b.dataset.amt)} to this driver?`)) return;
     act(b, async () => { await api(`/admin/payouts/${b.dataset.po}`, { method: 'POST' }); toast('Marked as paid out.'); adPayments(el); });
   });
+}
+
+async function adMessages(el) {
+  const load = async () => {
+    const { audiences, history, live } = await api('/admin/broadcast');
+    const keys = Object.keys(audiences);
+    S.bcAudience = S.bcAudience && audiences[S.bcAudience] ? S.bcAudience : 'drivers_approved';
+    el.innerHTML = `
+      ${live ? '' : '<div class="notice warn">SMS is in test mode, so messages are only written to the server log. Set a real SMS provider before sending to people.</div>'}
+      <form id="bc" class="card"><h3>Send an SMS</h3>
+        <label class="field"><span class="label">Send to</span><select name="audience" id="bcA">
+          ${keys.map(k => `<option value="${k}" ${S.bcAudience === k ? 'selected' : ''}>${esc(audiences[k].label)} (${audiences[k].count})</option>`).join('')}</select></label>
+        <label class="field"><span class="label">Message</span><textarea name="message" id="bcM" maxlength="480" rows="4" placeholder="e.g. Waka Bonny: from 1 December the weekly subscription of N2,000 starts. Pay in the app under Work, or at the association desk."></textarea></label>
+        <p id="bcInfo" class="small muted"></p>
+        <button class="btn" type="submit" id="bcGo">Send</button></form>
+      <h2>Messages sent</h2>
+      <div class="list">${history.length ? history.map(h => `<div class="card"><div class="row" style="align-items:center">
+          <b>${esc(audiences[h.audience] ? audiences[h.audience].label : h.audience)}</b>
+          <span class="tag ${h.status === 'done' ? 'ok' : h.status === 'failed' ? 'bad' : 'warn'}" style="flex:0 0 auto">${h.status === 'sending' ? 'Sending…' : esc(h.status)}</span></div>
+          <p class="small">${esc(h.message)}</p>
+          <p class="muted small">${fmtTime(h.created_at)}${h.admin_name ? ' · ' + esc(h.admin_name) : ''} · ${h.sent} sent${h.failed ? `, ${h.failed} failed` : ''} of ${h.recipients}</p></div>`).join('')
+        : '<p class="muted">No messages sent yet.</p>'}</div>`;
+    const info = () => {
+      const t = $('#bcM').value, n = audiences[$('#bcA').value].count;
+      const unicode = /[^\x00-\x7F]/.test(t);
+      const per = unicode ? 70 : 160, multi = unicode ? 67 : 153;
+      const seg = !t.length ? 0 : t.length <= per ? 1 : Math.ceil(t.length / multi);
+      $('#bcInfo').innerHTML = `${t.length} characters · <b>${seg || 1} SMS</b> per person · going to <b>${n}</b> people = about <b>${(seg || 1) * n}</b> SMS in total.
+        ${unicode ? '<br><span class="stale">Accents or emoji cut an SMS from 160 to 70 characters. Plain text is cheaper.</span>' : ''}`;
+      $('#bcGo').disabled = !n || t.trim().length < 10;
+    };
+    $('#bcM').oninput = info; $('#bcA').onchange = () => { S.bcAudience = $('#bcA').value; info(); };
+    info();
+    $('#bc').onsubmit = (e) => { e.preventDefault();
+      const b = Object.fromEntries(new FormData(e.target));
+      const n = audiences[b.audience].count;
+      if (!confirm(`Send this SMS to ${n} ${audiences[b.audience].label.toLowerCase()}? This costs money and cannot be undone.`)) return;
+      act(e.submitter, async () => {
+        await api('/admin/broadcast', { method: 'POST', body: { ...b, expect_recipients: n } });
+        toast(`Sending to ${n} people…`); e.target.reset(); delete e.target.dataset.dirty; load();
+      });
+    };
+  };
+  await load();
+  poll(() => (userEditing() ? Promise.resolve() : load()), 8000);
 }
 
 async function adSafety(el) {
@@ -1836,6 +1893,12 @@ async function adSettings(el) {
     <p class="muted small">Departures outside these hours are blocked. Clear both to remove the restriction.</p>
     <h3>Parcels and errands</h3>
     <div class="row">${f('parcel_fee', 'Parcel fee (₦)', 'Added to the zone fare.', 'number')}${f('errand_fee', 'Errand fee (₦)', 'Added to the zone fare.', 'number')}</div>
+    <h3>Online payments (Paystack)</h3>
+    <div class="row">${f('platform_commission_pct', 'Your commission (%)', '0 during the launch campaign. Taken out of every fare paid online.', 'number')}
+      <label class="field"><span class="label">Paystack's fee</span><select name="paystack_fee_bearer">
+        <option value="driver" ${s.paystack_fee_bearer !== 'platform' ? 'selected' : ''}>Driver's share covers it</option>
+        <option value="platform" ${s.paystack_fee_bearer === 'platform' ? 'selected' : ''}>Cylan Metro pays it</option></select></label></div>
+    <p class="muted small">When a driver has added a verified bank account, online fares are split by Paystack at the moment of payment: your commission comes to you and the rest goes straight to the driver's bank, with no manual payout. Paystack charges its own fee on each payment; choose whose share it comes out of.</p>
     <h3>Driver fees</h3>
     <label class="field"><span class="label">Mode</span><select name="subscription_mode">
       <option value="free" ${s.subscription_mode !== 'on' ? 'selected' : ''}>🎉 Launch campaign: free for all drivers</option>
@@ -1852,8 +1915,9 @@ async function adSettings(el) {
     if (body.subscription_mode === 'on' && s.subscription_mode !== 'on'
       && !confirm(`Switch on weekly subscriptions at ${naira(+body.weekly_subscription || 0)} per week? Every driver gets ${body.subscription_trial_days || 7} free days from today, then must pay to go online.`)) return;
     const out = await api('/admin/settings', { method: 'PUT', body }); await loadMeta();
-    toast(out.trials_started ? `Weekly subscriptions are on. ${out.trials_started} driver(s) started their free trial.` : 'Settings saved.');
-    s.subscription_mode = body.subscription_mode;
+    toast(out.trials_started ? `Weekly subscriptions are on. ${out.trials_started} driver(s) started their free trial.`
+      : out.resynced ? `Settings saved. Commission updated on ${out.resynced.updated} of ${out.resynced.total} driver account(s).` : 'Settings saved.');
+    s.subscription_mode = body.subscription_mode; s.paystack_fee_bearer = body.paystack_fee_bearer;
   }); };
 }
 

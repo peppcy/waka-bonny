@@ -23,10 +23,12 @@ async function call(method, path, body) {
 // Paystack needs an email; we use a stable per-user address because the app doesn't collect emails
 const emailFor = (phone) => `${phone}@${process.env.PAYSTACK_EMAIL_DOMAIN || 'wakabonny.ng'}`;
 
-const initialize = ({ phone, amountNaira, ref, callback, metadata, plan }) =>
+const initialize = ({ phone, amountNaira, ref, callback, metadata, plan, subaccount, bearer }) =>
   call('POST', '/transaction/initialize', {
     email: emailFor(phone), amount: amountNaira * 100, reference: ref, callback_url: callback, metadata,
-    ...(plan ? { plan } : {}), channels: ['card', 'bank', 'ussd', 'bank_transfer', 'mobile_money']
+    ...(plan ? { plan } : {}),
+    ...(subaccount ? { subaccount, ...(bearer ? { bearer } : {}) } : {}),
+    channels: ['card', 'bank', 'ussd', 'bank_transfer', 'mobile_money']
   });
 const verify = (ref) => call('GET', '/transaction/verify/' + encodeURIComponent(ref));
 const createPlan = (amountNaira) => call('POST', '/plan', { name: `Waka Bonny weekly driver plan ₦${amountNaira}`, interval: 'weekly', amount: amountNaira * 100 });
@@ -39,7 +41,26 @@ function validSignature(rawBody, signature) {
 }
 
 const listBanks = () => call('GET', '/bank?country=nigeria&perPage=100');
+
+// Subaccounts: each driver gets one, tied to the bank account they added.
+// percentage_charge is the share the MAIN (platform) account keeps; the rest goes to the driver.
+// Paystack's own docs disagree on the field name (bank_code in the table, settlement_bank in the sample),
+// so both are sent with the same value; the unused one is ignored.
+const createSubaccount = ({ businessName, bankCode, accountNumber, percentage, phone }) =>
+  call('POST', '/subaccount', {
+    business_name: businessName, bank_code: bankCode, settlement_bank: bankCode,
+    account_number: accountNumber, percentage_charge: percentage,
+    primary_contact_phone: phone || undefined, description: 'Waka Bonny driver'
+  });
+const updateSubaccount = (code, { businessName, bankCode, accountNumber, percentage, active }) =>
+  call('PUT', '/subaccount/' + encodeURIComponent(code), {
+    business_name: businessName, description: 'Waka Bonny driver',
+    ...(bankCode ? { bank_code: bankCode, settlement_bank: bankCode } : {}),
+    ...(accountNumber ? { account_number: accountNumber } : {}),
+    ...(percentage == null ? {} : { percentage_charge: percentage }),
+    ...(active == null ? {} : { active })
+  });
 const resolveAccount = (accountNumber, bankCode) =>
   call('GET', `/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`);
 
-module.exports = { enabled, initialize, verify, createPlan, disableSubscription, validSignature, emailFor, listBanks, resolveAccount };
+module.exports = { enabled, initialize, verify, createPlan, disableSubscription, validSignature, emailFor, listBanks, resolveAccount, createSubaccount, updateSubaccount };

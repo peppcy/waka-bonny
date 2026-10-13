@@ -94,7 +94,7 @@ router.post('/:id/delete', wrap(async (req, res) => {
   const reason = clean(req.body?.reason, 300);
   if (!reason) throw bad('Give a reason for deleting this account.');
   if (String(req.body?.confirm || '').trim().toUpperCase() !== 'DELETE') throw bad('Type DELETE to confirm.');
-  const drv = (await q('SELECT sub_code, sub_email_token, sub_auto FROM drivers WHERE user_id=$1', [u.id])).rows[0];
+  const drv = (await q('SELECT sub_code, sub_email_token, sub_auto, subaccount_code, plate FROM drivers WHERE user_id=$1', [u.id])).rows[0];
   const out = await tx(async (c) => {
     const live = (await c.query(`SELECT count(*)::int n FROM rides WHERE (passenger_id=$1 OR driver_id=$1) AND status='started'`, [u.id])).rows[0].n;
     if (live) throw bad('This user is on a trip right now. Ban them now and delete after the trip ends.');
@@ -123,6 +123,13 @@ router.post('/:id/delete', wrap(async (req, res) => {
   // Stop Paystack charging a deleted driver's card every week
   if (drv && drv.sub_auto && drv.sub_code && drv.sub_email_token) {
     try { await ps.disableSubscription(drv.sub_code, drv.sub_email_token); } catch (e) { console.error('Could not cancel Paystack subscription for deleted user', u.id, e.message); out.subCancelFailed = true; }
+  }
+  // Switch off their split subaccount so no further fare can settle to their bank
+  if (drv && drv.subaccount_code) {
+    try {
+      await ps.updateSubaccount(drv.subaccount_code, { businessName: `Deleted driver (${drv.plate || ''})`, active: false });
+      await q('UPDATE drivers SET subaccount_code=NULL, subaccount_pct=NULL WHERE user_id=$1', [u.id]);
+    } catch (e) { console.error('Could not deactivate Paystack subaccount for deleted user', u.id, e.message); out.subaccountFailed = true; }
   }
   res.json({ ok: true, ...out });
 }));

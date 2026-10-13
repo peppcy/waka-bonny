@@ -19,7 +19,9 @@ async function applyPayment(ref, ps) {
   if (!won) return { ok: true, payment: p, already: true };
 
   if (p.kind === 'ride') {
-    await q(`UPDATE rides SET pay_method='paystack', paid_at=now() WHERE id=$1 AND paid_at IS NULL`, [p.ride_id]);
+    // With a split, Paystack already sent the driver their share, so the fare is marked paid out too
+    await q(`UPDATE rides SET pay_method='paystack', paid_at=now(), payout_at=CASE WHEN $2::text IS NOT NULL THEN now() ELSE payout_at END
+        WHERE id=$1 AND paid_at IS NULL`, [p.ride_id, p.subaccount_code]);
   } else if (p.kind === 'seat') {
     await tx(async (c) => {
       const b = (await c.query('SELECT * FROM bookings WHERE id=$1 FOR UPDATE', [p.booking_id])).rows[0];

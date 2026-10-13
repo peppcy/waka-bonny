@@ -5,6 +5,7 @@ const { auth, driver } = require('../lib/auth');
 const { wrap, bad, int, HttpError } = require('../lib/util');
 const { coord, addPoint, paxFresh } = require('../lib/track');
 const { subState, requireActiveSub } = require('../lib/subs');
+const { ensureSubaccount, splitSettings } = require('../lib/split');
 const ps = require('../lib/paystack');
 const { clean } = require('../lib/util');
 const { km, byDistance } = require('../lib/geo');
@@ -35,7 +36,11 @@ router.get('/banks', driver({ allowPending: true }), wrap(async (req, res) => {
 
 router.get('/bank', driver({ allowPending: true }), wrap(async (req, res) => {
   const d = req.driver;
-  res.json({ bank: d.account_number ? { bank_code: d.bank_code, bank_name: d.bank_name, account_number: d.account_number, account_name: d.account_name, verified: d.account_verified } : null });
+  const { pct } = await splitSettings();
+  res.json({
+    bank: d.account_number ? { bank_code: d.bank_code, bank_name: d.bank_name, account_number: d.account_number, account_name: d.account_name, verified: d.account_verified, split: !!d.subaccount_code } : null,
+    commission_pct: pct
+  });
 }));
 
 router.put('/bank', driver({ allowPending: true }), wrap(async (req, res) => {
@@ -52,9 +57,13 @@ router.put('/bank', driver({ allowPending: true }), wrap(async (req, res) => {
     accName = clean(req.body?.account_name, 80);
     if (!bankName || !accName) throw bad('Enter your bank name and the account name exactly as the bank shows it.');
   }
+  const changed = d => d.account_number !== num || d.bank_code !== bankCode;
+  const before = (await q('SELECT account_number, bank_code FROM drivers WHERE user_id=$1', [req.user.id])).rows[0];
   await q(`UPDATE drivers SET bank_code=$1, bank_name=$2, account_number=$3, account_name=$4, account_verified=$5 WHERE user_id=$6`,
     [bankCode, bankName, num, accName, verified, req.user.id]);
-  res.json({ bank: { bank_code: bankCode, bank_name: bankName, account_number: num, account_name: accName, verified } });
+  // Point their Paystack subaccount at the new details so online fares settle to the right bank
+  const sub = verified ? await ensureSubaccount(req.user.id, { force: changed(before) }) : null;
+  res.json({ bank: { bank_code: bankCode, bank_name: bankName, account_number: num, account_name: accName, verified, split: !!sub } });
 }));
 
 router.delete('/bank', driver({ allowPending: true }), wrap(async (req, res) => {

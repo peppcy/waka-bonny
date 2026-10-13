@@ -5,6 +5,7 @@ const { auth } = require('../lib/auth');
 const ps = require('../lib/paystack');
 const { applyPayment } = require('../lib/payments');
 const { extendWeeks, subSettings } = require('../lib/subs');
+const { splitFor } = require('../lib/split');
 const { getSettings } = require('../lib/fares');
 const { wrap, bad, int, code, HttpError } = require('../lib/util');
 
@@ -52,17 +53,23 @@ router.use(auth());
 
 router.get('/status', wrap(async (req, res) => res.json({ enabled: ps.enabled() })));
 
-async function start(req, { kind, amount, rideId = null, bookingId = null, plan = null, label }) {
+async function start(req, { kind, amount, rideId = null, bookingId = null, plan = null, label, driverId = null }) {
   if (!(amount > 0)) throw bad('Nothing to pay.');
+  // Fares are split at the moment of payment: the driver's share settles to their own bank.
+  // Subscriptions are not split: they belong entirely to the platform.
+  const split = driverId ? await splitFor(driverId) : null;
+  const commission = split ? Math.round(amount * split.pct / 100) : null;
   const ref = 'WB' + Date.now().toString(36).toUpperCase() + code(3);
-  await q(`INSERT INTO payments(ref, user_id, kind, ride_id, booking_id, amount) VALUES($1,$2,$3,$4,$5,$6)`,
-    [ref, req.user.id, kind, rideId, bookingId, amount]);
+  await q(`INSERT INTO payments(ref, user_id, kind, ride_id, booking_id, amount, driver_id, subaccount_code, commission)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [ref, req.user.id, kind, rideId, bookingId, amount, driverId, split && split.subaccount, commission]);
   const init = await ps.initialize({
     phone: req.user.phone, amountNaira: amount, ref, plan,
+    subaccount: split && split.subaccount, bearer: split && split.bearer,
     callback: `${base(req)}/?pay=${ref}`,
     metadata: { kind, ride_id: rideId, booking_id: bookingId, user_id: req.user.id, custom_fields: [{ display_name: 'For', variable_name: 'for', value: label }] }
   });
-  return { ref, authorization_url: init.authorization_url };
+  return { ref, authorization_url: init.authorization_url, split: !!split };
 }
 
 router.post('/ride/:id', wrap(async (req, res) => {
@@ -70,17 +77,17 @@ router.post('/ride/:id', wrap(async (req, res) => {
   if (!r) throw new HttpError(404, 'Trip not found.');
   if (r.status !== 'completed') throw bad('You can pay once the trip has ended.');
   if (r.paid_at) throw bad('This trip is already paid.');
-  res.json(await start(req, { kind: 'ride', amount: r.fare, rideId: r.id, label: `Waka Bonny ${r.service} #${r.id}` }));
+  res.json(await start(req, { kind: 'ride', amount: r.fare, rideId: r.id, driverId: r.driver_id, label: `Waka Bonny ${r.service} #${r.id}` }));
 }));
 
 router.post('/booking/:id', wrap(async (req, res) => {
-  const b = (await q(`SELECT b.*, dp.price, dp.status AS dep_status FROM bookings b JOIN departures dp ON dp.id=b.departure_id
+  const b = (await q(`SELECT b.*, dp.price, dp.status AS dep_status, dp.driver_id FROM bookings b JOIN departures dp ON dp.id=b.departure_id
       WHERE b.id=$1 AND b.passenger_id=$2`, [int(req.params.id), req.user.id])).rows[0];
   if (!b) throw new HttpError(404, 'Booking not found.');
   if (b.paid) throw bad('This booking is already paid.');
   if (!['held', 'booked'].includes(b.status) || !['scheduled', 'boarding'].includes(b.dep_status)) throw bad('This booking can no longer be paid online.');
   if (b.status === 'held') await q(`UPDATE bookings SET hold_until = GREATEST(hold_until, now() + interval '15 minutes') WHERE id=$1`, [b.id]);
-  res.json(await start(req, { kind: 'seat', amount: b.price * b.seats, bookingId: b.id, label: `Bonny-PH seats ${b.ref}` }));
+  res.json(await start(req, { kind: 'seat', amount: b.price * b.seats, bookingId: b.id, driverId: b.driver_id, label: `Bonny-PH seats ${b.ref}` }));
 }));
 
 // Weekly subscription: mode "auto" = card charged every week by Paystack; "once" = pay one week (any channel)
