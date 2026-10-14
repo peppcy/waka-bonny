@@ -355,20 +355,62 @@ async function shrinkPhoto(file, max = 1400, quality = 0.75) {
 
 // ---------- driver GPS sender ----------
 // Keeps sending the driver's position while they're online or on a trip. Screen is kept awake during trips.
+// True only inside the installed Android app, where location keeps flowing with the screen off.
+const native = () => !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const nativeGeo = () => (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.BackgroundGeolocation) || null;
+
 const GPS = {
-  watch: null, timer: null, coords: null, sentAt: 0, every: 15000, error: null, wake: null,
+  watch: null, timer: null, coords: null, sentAt: 0, every: 15000, error: null, wake: null, nativeId: null, starting: false,
   start(every) {
     this.every = every;
-    if (!navigator.geolocation) { this.error = 'This phone can\'t share its location.'; this.note(); return; }
-    if (this.watch == null) {
+    // In the Android app a background service keeps reporting while the driver's screen is off
+    if (native() && nativeGeo()) this.startNative();
+    else if (!navigator.geolocation) { this.error = 'This phone can\'t share its location.'; this.note(); return; }
+    else if (this.watch == null) {
       this.watch = navigator.geolocation.watchPosition(p => { this.error = null; this.coords = p.coords; this.send(); this.note(); },
         e => { this.error = e.code === 1 ? 'Location is blocked. Allow location for this site in your browser settings, otherwise passengers can\'t see you on the map.' : 'Can\'t get your GPS position. Check location is switched on.'; this.note(); },
         { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
     }
     clearInterval(this.timer);
+    // Keeps reporting even when the vehicle is parked, so the driver doesn't look offline
     this.timer = setInterval(() => this.send(true), every);
   },
-  stop() { if (this.watch != null) navigator.geolocation.clearWatch(this.watch); this.watch = null; clearInterval(this.timer); this.timer = null; this.keepAwake(false); },
+  async startNative() {
+    const BG = nativeGeo();
+    if (!BG || this.nativeId || this.starting) return;
+    this.starting = true;
+    try {
+      this.nativeId = await BG.addWatcher({
+        // Android requires this notification while location is shared; the wording tells the driver the truth
+        backgroundTitle: 'Waka Bonny is sharing your location',
+        backgroundMessage: 'Your passenger can see where you are. This stops when the job ends.',
+        requestPermissions: true,
+        stale: false,
+        distanceFilter: 15
+      }, (loc, err) => {
+        if (err) {
+          this.error = err.code === 'NOT_AUTHORIZED'
+            ? 'Location is blocked for Waka Bonny. Open your phone settings and allow location, otherwise passengers can\'t see you.'
+            : 'Can\'t get your GPS position. Check location is switched on.';
+          this.note(); return;
+        }
+        if (!loc) return;
+        this.error = null;
+        this.coords = { latitude: loc.latitude, longitude: loc.longitude, heading: loc.bearing };
+        this.send(); this.note();
+      });
+    } catch { this.error = 'Could not start location sharing on this phone.'; this.note(); }
+    finally { this.starting = false; }
+  },
+  stopNative() {
+    const BG = nativeGeo();
+    if (BG && this.nativeId) { const id = this.nativeId; this.nativeId = null; BG.removeWatcher({ id }).catch(() => {}); }
+  },
+  stop() {
+    if (this.watch != null) navigator.geolocation.clearWatch(this.watch);
+    this.watch = null; clearInterval(this.timer); this.timer = null;
+    this.stopNative(); this.keepAwake(false);
+  },
   send(force) {
     if (!this.coords) return;
     if (!force && Date.now() - this.sentAt < Math.min(this.every, 4000)) return;
@@ -377,6 +419,8 @@ const GPS = {
     api('/driver/location', { method: 'POST', body: { lat: c.latitude, lng: c.longitude, heading: c.heading } }).catch(() => {});
   },
   async keepAwake(on) {
+    // Pointless in the Android app: the background service keeps reporting with the screen off
+    if (native()) return;
     try {
       if (on && !this.wake && navigator.wakeLock) { this.wake = await navigator.wakeLock.request('screen'); this.wake.addEventListener('release', () => { this.wake = null; }); }
       if (!on && this.wake) { await this.wake.release(); this.wake = null; }
@@ -385,7 +429,9 @@ const GPS = {
   note() {
     const el = $('#gpsNote'); if (!el) return;
     el.className = 'notice gps-note ' + (this.error ? 'bad' : '');
-    el.textContent = this.error || (this.coords ? '📡 Sharing your live location with passengers.' : '📡 Getting your GPS position…');
+    el.textContent = this.error || (this.coords
+      ? (native() ? '📡 Sharing your live location. This keeps working with your screen off.' : '📡 Sharing your live location with passengers.')
+      : '📡 Getting your GPS position…');
   }
 };
 document.addEventListener('visibilitychange', () => { if (!document.hidden && GPS.timer && GPS.every <= 5000) GPS.keepAwake(true); });
@@ -1114,6 +1160,9 @@ async function pushRefresh() {
 function pushCard(st, { compact = false } = {}) {
   if (!st.server) return '';
   const head = compact ? '' : '<h3>Alerts on this phone</h3>';
+  // The Android app runs in a system WebView, which has no Web Push. Say so plainly rather than
+  // telling a driver to "use Chrome" while they are standing in the app.
+  if (native()) return `<div class="card">${head}<p class="small">Alerts don't work inside the installed app yet. To get them, open <b>wakabonny.ng</b> in Chrome on this phone and switch alerts on there. Your location sharing keeps working here either way.</p></div>`;
   if (!st.supported) return `<div class="card">${head}<p class="muted small">This browser cannot show alerts. Use Chrome on Android, or Safari on iPhone with Waka Bonny added to the Home Screen.</p></div>`;
   if (isIos() && !installed()) return `<div class="card">${head}<p class="small">To get alerts on iPhone, tap <b>Share</b> then <b>Add to Home Screen</b>, and open Waka Bonny from there.</p></div>`;
   if (st.permission === 'denied') return `<div class="card">${head}<p class="small">Alerts are blocked for Waka Bonny in your phone's settings. Allow notifications for this app, then reload.</p></div>`;

@@ -81,7 +81,7 @@ npm run dev               # http://localhost:3000
 - The route driven is recorded from whichever source is live, and kept after the trip. The live position is hidden once the trip ends.
 - The pickup point comes from the passenger's GPS at request time; the driver gets "Navigate to pickup" (Google Maps).
 - Bus/Sienna passengers get "Track vehicle" (driver's GPS) plus their own blue dot.
-- Phone browsers pause GPS when the app is closed or the screen locks. A wrapped Android app with a background-location plugin removes that limit.
+- Phone browsers pause GPS when the app is closed or the screen locks. The Android app in `android-app/` removes that limit with a background service, so a driver's trail keeps updating with the screen off.
 - Maps use OpenStreetMap tiles (free, no key). For heavy traffic, switch the tile URL in `public/app.js` to a paid provider (MapTiler, Stadia) per OSM's usage policy.
 
 ## Mobile app (PWA)
@@ -282,8 +282,23 @@ Tapping an alert opens the app on the right screen, reusing the window if it is 
 
 **Housekeeping, nothing to do:** an alert never blocks or slows the thing that triggered it. A phone that uninstalled the app or revoked permission is dropped the first time a push comes back as gone; one that keeps failing for another reason is dropped after ten tries. If someone reinstalls the app or you rotate the key, their phone re-registers itself the next time they open it.
 
+## Android app
+
+`android-app/` holds a Capacitor shell that wraps the live site. Its own README has the build
+steps. It exists for one thing the browser cannot do: **keep sharing a driver's location while
+their screen is off**, through an Android foreground service with a visible notification.
+
+The app loads `https://wakabonny.ng` rather than carrying a copy of the web app, so every Railway
+deploy reaches app users straight away and the APK only needs rebuilding when the shell changes.
+Capacitor's build tools live in that folder's own `package.json`, so the server's dependencies —
+and its clean `npm audit` — are untouched.
+
+**Push notifications do not work inside the app.** The Android WebView has no Web Push API. A
+driver in the app gets background GPS but no alerts, and the Account screen tells them so. Making
+alerts work in the app means adding Firebase Cloud Messaging on both sides. Until then the
+website is the better experience for most drivers.
+
 ## Not in this MVP (phase 2)
 
 - USSD booking for feature phones
-- Native Android app (the web app works on Android now; it can be wrapped later)
 - Corporate accounts for NLNG contractors

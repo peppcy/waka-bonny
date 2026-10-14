@@ -1,0 +1,17 @@
+{
+  "appId": "ng.wakabonny.app",
+  "appName": "Waka Bonny",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "server": {
+    "url": "https://wakabonny.ng",
+    "androidScheme": "https",
+    "cleartext": false,
+    "allowNavigation": ["wakabonny.ng", "*.wakabonny.ng", "checkout.paystack.com", "*.paystack.com", "*.paystack.co"]
+  },
+  "plugins": {
+    "BackgroundGeolocation": {}
+  }
+}
