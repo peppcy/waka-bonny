@@ -55,6 +55,13 @@ app.use((err, req, res, next) => {
   await q(fs.readFileSync(path.join(__dirname, '..', 'db', 'schema.sql'), 'utf8'));
   const port = process.env.PORT || 3000;
   app.listen(port, () => console.log(`Waka Bonny running on :${port}`));
+  // Delete location data older than the period in the Privacy Policy
+  {
+    const { purge } = require('./lib/retention');
+    const run = () => purge().catch(e => console.error('Retention clean-up failed:', e.message));
+    setTimeout(run, 60000);
+    setInterval(run, 24 * 60 * 60 * 1000);
+  }
   // Pick up neighbourhood changes made in Hale without a redeploy
   if (process.env.HALE_API_URL) {
     const { syncZones } = require('./lib/zonesync');

@@ -334,3 +334,6 @@ CREATE TABLE IF NOT EXISTS driver_docs (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS driver_docs_one_per_kind ON driver_docs(user_id, kind);
+
+-- When the user accepted the Terms of Use and Privacy Policy
+ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ;

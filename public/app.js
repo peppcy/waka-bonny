@@ -388,6 +388,31 @@ const GPS = {
 };
 document.addEventListener('visibilitychange', () => { if (!document.hidden && GPS.timer && GPS.every <= 5000) GPS.keepAwake(true); });
 
+// ---------- Terms, Privacy and Refund pages ----------
+async function viewLegal(which) {
+  stopPoll(); resetView();
+  S.view = 'legal'; S.legalWhich = which; nav(S.user ? menuFor() : []);
+  app.innerHTML = '<p class="muted">Loading…</p>';
+  let L;
+  try { L = S.legal = S.legal || await api('/public/legal', { auth: false }); }
+  catch { app.innerHTML = '<div class="notice bad">Could not load. Check your connection and try again.</div>'; return; }
+  const doc = L.docs.find(d => d.id === which) || L.docs[0];
+  const tab = (t) => t.replace(' and Cancellation Policy', 's').replace(' Policy', '').replace(' of Use', '');
+  app.innerHTML = `
+    <div class="seg" role="group" aria-label="Legal documents">${L.docs.map(d => `<button data-lg="${d.id}" aria-pressed="${d.id === doc.id}">${esc(tab(d.title))}</button>`).join('')}</div>
+    <article class="legal">
+      <h1>${esc(doc.title)}</h1>
+      <p class="muted small">${esc(L.company)} (${esc(L.rc)}) · Last updated ${esc(L.updated)}</p>
+      <p class="lead">${esc(doc.intro)}</p>
+      ${doc.sections.map(([h, ps], i) => `<h2>${i + 1}. ${esc(h)}</h2>${ps.map(t => `<p>${esc(t)}</p>`).join('')}`).join('')}
+      <p class="muted small">${esc(L.company)} · ${esc(L.address)} · <a href="mailto:${esc(L.email)}">${esc(L.email)}</a></p>
+    </article>
+    <button class="btn ghost" id="lgBack">Back</button>`;
+  $$('[data-lg]').forEach(b => b.onclick = () => viewLegal(b.dataset.lg));
+  $('#lgBack').onclick = () => { history.replaceState(null, '', '/'); S.user ? home() : go('auth'); };
+  window.scrollTo({ top: 0 });
+}
+
 // ---------- navigation ----------
 const NAV_ICON = { ride: '🛺', intercity: '🚌', trips: '🧾', account: '👤', driver: '🧭', admin: '📊', depot: '🏬' };
 function nav(items) {
@@ -410,7 +435,7 @@ function go(view, push = true) {
   if (push) history.replaceState(null, '', '/');
   app.classList.toggle('wide', view === 'admin');
   nav(menuFor());
-  const V = { auth: viewAuth, ride: viewRide, intercity: viewIntercity, trips: viewTrips, account: viewAccount, driver: viewDriver, admin: viewAdmin, depot: viewDepot };
+  const V = { auth: viewAuth, ride: viewRide, intercity: viewIntercity, trips: viewTrips, account: viewAccount, driver: viewDriver, admin: viewAdmin, depot: viewDepot, legal: () => viewLegal(S.legalWhich || 'terms') };
   (V[view] || viewAuth)().catch(fail);
 }
 function home() {
@@ -468,6 +493,8 @@ async function viewAuth() {
       <label class="field"><span class="label">Full name</span><input name="name" autocomplete="name" value="${esc(A.name || '')}" required></label>
       ${pinFields('Create a PIN')}
       <label class="field"><span class="label">Emergency contact phone (optional)</span><input name="emergency_phone" type="tel" inputmode="tel" placeholder="Family member's number"></label>
+      <label class="agree"><input type="checkbox" name="accept_terms" id="agree" required>
+        <span>I have read and accept the <button type="button" class="link" data-open-legal="terms">Terms of Use</button> and the <button type="button" class="link" data-open-legal="privacy">Privacy Policy</button>.</span></label>
       ${role === 'driver' ? `
         <label class="field"><span class="label">Vehicle type</span><select name="vehicle_type" required>
           <option value="">Choose vehicle</option>${Object.entries(VEH).map(([k, v]) => `<option value="${k}">${VEH_ICON[k]} ${v}</option>`).join('')}</select></label>
@@ -494,7 +521,12 @@ async function viewAuth() {
     ${S.bannedMsg ? `<div class="notice bad">${esc(S.bannedMsg)}</div>` : ''}
     <form id="authForm" class="card" novalidate><h2>${title}</h2>${body}</form>`;
   const reset = (mode) => { S.auth = { mode, step: 'phone', role: A.role }; viewAuth(); };
+  if (S.authDraft) {
+    const draft = S.authDraft; S.authDraft = null;
+    for (const [k, v] of Object.entries(draft)) { const el = $(`#authForm [name="${k}"]`); if (el && el.type !== 'checkbox' && v) el.value = v; }
+  }
   $$('[data-m]').forEach(b => b.onclick = () => reset(b.dataset.m));
+  $$('[data-open-legal]').forEach(b => b.onclick = () => { S.authDraft = Object.fromEntries(new FormData($('#authForm'))); viewLegal(b.dataset.openLegal); });
   $$('[data-r]').forEach(b => b.onclick = () => { A.name = $('input[name=name]')?.value; A.role = b.dataset.r; viewAuth(); });
   $$('[data-own]').forEach(b => b.onclick = () => {
     // keep what was typed while switching ownership
@@ -525,12 +557,13 @@ async function viewAuth() {
         const v = await api('/auth/otp/verify', { method: 'POST', auth: false, body: { phone: A.phone, code: b.code, purpose: A.mode === 'reset' ? 'reset' : 'register' } });
         A.verify = v.verify_token; A.step = 'details'; A.devCode = null; return viewAuth();
       }
+      if (A.mode === 'register' && !b.accept_terms) throw new Error('Please accept the Terms of Use and Privacy Policy.');
       if (b.pin !== b.pin_confirm) throw new Error('The two PINs do not match.');
       if (A.mode === 'reset') {
         const out = await api('/auth/reset-pin', { method: 'POST', auth: false, body: { verify_token: A.verify, pin: b.pin } });
         return signedIn(out, 'PIN changed. You are signed in.');
       }
-      const out = await api('/auth/register', { method: 'POST', auth: false, body: { ...b, role: A.role, owner_type: A.own || 'self', verify_token: A.verify } });
+      const out = await api('/auth/register', { method: 'POST', auth: false, body: { ...b, accept_terms: true, role: A.role, owner_type: A.own || 'self', verify_token: A.verify } });
       signedIn(out, 'Account created.');
     });
   };
@@ -1010,7 +1043,11 @@ async function viewAccount() {
       <div class="row"><label class="field"><span class="label">New PIN</span><input name="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="new-password" required></label>
       <label class="field"><span class="label">Repeat new PIN</span><input name="pin_confirm" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="new-password" required></label></div>
       <button class="btn ghost" type="submit">Change PIN</button></form>
+    <div class="card"><h3>Legal</h3>
+      <div class="list">${[['terms', 'Terms of Use'], ['privacy', 'Privacy Policy'], ['refunds', 'Refund and Cancellation Policy']].map(([id, label]) =>
+        `<button class="item" data-legal="${id}" style="text-align:left;cursor:pointer"><span>${esc(label)}</span><span class="muted">›</span></button>`).join('')}</div></div>
     <button class="btn ghost" id="out">Sign out</button>`;
+  $$('[data-legal]').forEach(b => b.onclick = () => viewLegal(b.dataset.legal));
   $('#cpin').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { const b = Object.fromEntries(new FormData(e.target)); if (b.pin !== b.pin_confirm) throw new Error('The two new PINs do not match.'); await api('/auth/change-pin', { method: 'POST', body: b }); e.target.reset(); toast('PIN changed.'); }); };
   $('#acc').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { const out = await api('/auth/me', { method: 'PUT', body: Object.fromEntries(new FormData(e.target)) }); S.user = out.user; toast('Emergency contact saved.'); }); };
   $('#out').onclick = () => signOut();
@@ -2085,6 +2122,7 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
   const p = new URLSearchParams(location.search);
   if (S.token) { try { S.user = (await api('/auth/me')).user; } catch { S.user = null; } }
   if (p.get('pay') && S.user) return handlePayReturn(p.get('pay'));
+  if (p.get('legal')) return viewLegal(p.get('legal'));
   if (p.get('t')) return viewShare(p.get('t'));
   if (p.get('p')) return viewPackage(p.get('p'));
   if (p.get('badge')) return viewBadge(p.get('badge'));

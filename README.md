@@ -164,6 +164,27 @@ Drivers photograph four things in the app: **photo ID**, **vehicle papers**, **a
 - Desk → Settings → **Driver documents** decides whether every document must be approved before a driver can be approved at all. It is **optional by default**, so the launch campaign isn't held up; switch it on when you're ready.
 - Images are kept in the database and are never public: the app shows them through a signed link that expires after 20 minutes. Deleting a driver erases their documents with the rest of their personal data.
 
+## Terms, privacy and refunds
+
+The three documents live in `legal/content.js`, which is the only place to edit them. `node legal/build-docx.js <folder>` regenerates both the Word files and `legal/legal.json`, which the app serves at `/api/public/legal`.
+
+- They appear as pages in the app (Account → Legal, and from the sign-up screen) and at `/?legal=terms`, `/?legal=privacy`, `/?legal=refunds`.
+- Creating an account requires ticking **I have read and accept the Terms of Use and the Privacy Policy**. The server refuses a sign-up without it and records the date of acceptance against the account.
+- Opening a document from the sign-up screen keeps whatever has already been typed.
+
+**These are drafts, not legal advice.** Have a Nigerian lawyer review them before you launch, especially the liability and refund sections.
+
+## Keeping data only as long as promised
+
+A clean-up runs every 24 hours so the Privacy Policy is true in practice, not just on paper:
+
+- Location trails and the coordinates of pickups and drop-offs: deleted after 12 months (`RETENTION_MONTHS` changes this).
+- Sign-in codes: deleted after 7 days.
+- SOS alerts and complaints: deleted after 3 years.
+- Sent SMS history: deleted after 2 years.
+
+Trip, payment and account records are not touched by this: they stay, minus the location data. Payment records are kept 6 years for tax, as the policy says.
+
 ## Managing users (platform owner)
 
 Desk → **Users**: every customer and driver, searchable by name or phone and filterable by type and status. Open a user to see their details, recent trips, complaints, payments and moderation history.

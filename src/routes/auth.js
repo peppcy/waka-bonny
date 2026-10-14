@@ -80,6 +80,7 @@ router.post('/register', limiter, wrap(async (req, res) => {
   const pin = String(b.pin || '');
   const role = b.role === 'driver' ? 'driver' : 'passenger';
   if (!name) throw bad('Enter your full name.');
+  if (!b.accept_terms) throw bad('Please accept the Terms of Use and Privacy Policy to create an account.');
   if (!/^\d{4,6}$/.test(pin)) throw bad('Your PIN must be 4 to 6 digits.');
   if (/^(\d)\1+$/.test(pin) || '0123456789'.includes(pin) || '9876543210'.includes(pin)) throw bad('Choose a PIN that is harder to guess (not 1111 or 1234).');
   if (b.pin_confirm != null && String(b.pin_confirm) !== pin) throw bad('The two PINs do not match.');
@@ -94,8 +95,8 @@ router.post('/register', limiter, wrap(async (req, res) => {
   if ((await q('SELECT 1 FROM users WHERE phone=$1', [phone])).rows[0]) throw bad('This phone number already has an account. Sign in instead.');
   const hash = await bcrypt.hash(pin, 10);
   const user = await tx(async (c) => {
-    const u = (await c.query('INSERT INTO users(name, phone, pin_hash, role, emergency_phone, phone_verified) VALUES($1,$2,$3,$4,$5,true) RETURNING id',
-      [name, phone, hash, role, emergency])).rows[0];
+    const u = (await c.query(`INSERT INTO users(name, phone, pin_hash, role, emergency_phone, phone_verified, terms_accepted_at)
+        VALUES($1,$2,$3,$4,$5,true,now()) RETURNING id`, [name, phone, hash, role, emergency])).rows[0];
     if (role === 'driver') {
       const other = b.owner_type === 'other';
       await c.query(`INSERT INTO drivers(user_id, vehicle_type, plate, permit_no, vehicle_desc, badge_code, owner_type, owner_name, owner_phone) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,

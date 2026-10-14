@@ -120,6 +120,14 @@ router.post('/package/:token/collect', pkgLimiter, wrap(async (req, res) => {
   res.json(publicView(await pkgByToken(req.params.token)));
 }));
 
+// Terms of Use, Privacy Policy and Refund Policy, shown as pages inside the app
+let legalCache = null;
+router.get('/legal', wrap(async (req, res) => {
+  if (!legalCache) legalCache = require('../../legal/legal.json');
+  res.set('Cache-Control', 'public, max-age=900');
+  res.json(legalCache);
+}));
+
 // A driver's document, shown only through the short-lived signed link the app generates
 router.get('/doc/:token', wrap(async (req, res) => {
   const id = docs.readViewToken(req.params.token);
