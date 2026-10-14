@@ -1815,12 +1815,12 @@ async function adDepots(el) {
 }
 
 // ---------- admin desk ----------
-const ADMIN_TABS = [['overview', 'Overview'], ['users', 'Users'], ['drivers', 'Drivers'], ['fares', 'Fares & areas'], ['intercity', 'Bonny ⇄ PH'], ['depots', 'Depots'], ['payments', 'Payments'], ['messages', 'Messages'], ['safety', 'Safety'], ['settings', 'Settings']];
+const ADMIN_TABS = [['overview', 'Overview'], ['users', 'Users'], ['drivers', 'Drivers'], ['fares', 'Fares & areas'], ['intercity', 'Bonny ⇄ PH'], ['depots', 'Depots'], ['payments', 'Payments'], ['messages', 'Messages'], ['reports', 'Reports'], ['safety', 'Safety'], ['settings', 'Settings']];
 async function viewAdmin() {
   S.adminTab = S.adminTab || 'overview';
   app.innerHTML = `<div class="seg" role="tablist" style="overflow-x:auto">${ADMIN_TABS.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-pressed="${S.adminTab === k}">${l}</button>`).join('')}</div><div id="tab" class="list"></div>`;
   $$('[data-tab]').forEach(b => b.onclick = () => { S.adminTab = b.dataset.tab; stopPoll(); viewAdmin().catch(fail); });
-  const T = { overview: adOverview, users: adUsers, drivers: adDrivers, fares: adFares, intercity: adIntercity, depots: adDepots, payments: adPayments, messages: adMessages, safety: adSafety, settings: adSettings };
+  const T = { overview: adOverview, users: adUsers, drivers: adDrivers, fares: adFares, intercity: adIntercity, depots: adDepots, payments: adPayments, messages: adMessages, reports: adReports, safety: adSafety, settings: adSettings };
   await T[S.adminTab]($('#tab'));
 }
 
@@ -2121,6 +2121,85 @@ async function adMessages(el) {
   };
   await load();
   poll(() => (userEditing() ? Promise.resolve() : load()), 8000);
+}
+
+// Downloads need the sign-in header, which a plain link cannot send, so the file
+// is fetched and handed to the browser as a blob.
+async function downloadFile(path) {
+  const res = await fetch(API + '/api' + path, { headers: S.token ? { Authorization: 'Bearer ' + S.token } : {} });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error(d.error || 'That report could not be built.');
+  }
+  const cd = res.headers.get('Content-Disposition') || '';
+  const m = /filename="?([^"]+)"?/.exec(cd);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = m ? m[1] : 'report.xlsx';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+const lagosToday = () => new Date(Date.now() + 60 * 60000).toISOString().slice(0, 10);
+function datePreset(which) {
+  const t = new Date(Date.now() + 60 * 60000); // Lagos
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const d = (n) => { const x = new Date(t); x.setUTCDate(x.getUTCDate() - n); return x; };
+  if (which === 'today') return [iso(t), iso(t)];
+  if (which === 'week') return [iso(d(6)), iso(t)];
+  if (which === 'month') return [iso(new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1))), iso(t)];
+  const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 0));
+  return [iso(new Date(Date.UTC(last.getUTCFullYear(), last.getUTCMonth(), 1))), iso(last)];
+}
+
+async function adReports(el) {
+  const { depots, routes, first_activity } = await api('/admin/reports');
+  if (!S.rep) { const [a, b] = datePreset('week'); S.rep = { from: a, to: b }; }
+  const max = lagosToday();
+  const REPORTS = [
+    ['rides', '🛺 Rides and deliveries', 'Every trip, parcel and errand in the period, with a day-by-day summary and your busiest routes.', ''],
+    ['drivers', '💰 Driver earnings', 'What each driver earned, what the platform took in commission, what is still owed to them, and their bank details.', ''],
+    ['packages', '📦 Depot packages', 'Packages registered, collected, delivered or returned, the delivery runs, and the cash drivers owe each depot.',
+      depots.length ? `<label class="field"><span class="label">Depot</span><select data-opt="packages" name="depot_id"><option value="">All depots</option>${depots.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select></label>` : ''],
+    ['manifests', '🚌 Port Harcourt departures', 'Every departure with how full it was, plus a printable passenger manifest with next of kin.',
+      routes.length ? `<label class="field"><span class="label">Route</span><select data-opt="manifests" name="route_id"><option value="">All routes</option>${routes.map(r => `<option value="${r.id}">${esc(r.origin)} → ${esc(r.destination)}</option>`).join('')}</select></label>` : '']
+  ];
+
+  el.innerHTML = `
+    <div class="card"><h3>Period</h3>
+      <div class="row"><label class="field"><span class="label">From</span><input type="date" id="rfrom" value="${S.rep.from}" max="${max}"></label>
+        <label class="field"><span class="label">To</span><input type="date" id="rto" value="${S.rep.to}" max="${max}"></label></div>
+      <div class="row" style="flex-wrap:wrap">${[['today', 'Today'], ['week', 'Last 7 days'], ['month', 'This month'], ['lastmonth', 'Last month']]
+        .map(([k, l]) => `<button class="btn ghost sm" data-preset="${k}">${l}</button>`).join('')}</div>
+      <p class="muted small" id="rnote"></p></div>
+    ${REPORTS.map(([k, title, desc, extra]) => `<div class="card"><h3>${title}</h3><p class="small muted">${desc}</p>
+      ${extra}<button class="btn sm" data-rep="${k}">Download Excel</button></div>`).join('')}
+    <p class="muted small">Each workbook opens in Excel, Google Sheets or LibreOffice. The last sheet, <b>About</b>, says what every column counts, so figures can be checked later.</p>`;
+
+  const note = () => {
+    const f = $('#rfrom').value, t = $('#rto').value;
+    $('#rnote').textContent = !f || !t ? 'Choose both dates.'
+      : f > t ? 'The start date is after the end date.'
+      : first_activity && f < String(first_activity).slice(0, 10) ? `There is no data before ${String(first_activity).slice(0, 10)}.`
+      : '';
+    $$('[data-rep]').forEach(b => b.disabled = !f || !t || f > t);
+  };
+  $('#rfrom').onchange = $('#rto').onchange = () => { S.rep = { from: $('#rfrom').value, to: $('#rto').value }; note(); };
+  $$('[data-preset]').forEach(b => b.onclick = () => {
+    const [a, z] = datePreset(b.dataset.preset);
+    $('#rfrom').value = a; $('#rto').value = z; S.rep = { from: a, to: z }; note();
+  });
+  note();
+
+  $$('[data-rep]').forEach(b => b.onclick = () => act(b, async () => {
+    const kind = b.dataset.rep;
+    const extra = el.querySelector(`[data-opt="${kind}"]`);
+    const p = new URLSearchParams({ from: $('#rfrom').value, to: $('#rto').value });
+    if (extra && extra.value) p.set(extra.name, extra.value);
+    await downloadFile(`/admin/reports/${kind}?${p}`);
+    toast('Report downloaded.');
+  }));
 }
 
 async function adSafety(el) {

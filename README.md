@@ -31,6 +31,7 @@ Stack: Node.js / Express / PostgreSQL. The frontend is plain HTML/JS in `public/
 
 **Association / admin desk**
 - Overview: drivers online, live rides, fares today, SOS and complaints, placeholder fares count
+- Reports: four Excel downloads (rides, driver earnings, depot packages, Port Harcourt manifests) for any period
 - Approve, reject, suspend, reinstate drivers; strikes (3 strikes = automatic suspension)
 - Fares per vehicle type and area pair (placeholders until set); add or hide neighbourhoods
 - Intercity seat prices per route (bus and Sienna), stops, all departures and manifests
@@ -223,13 +224,37 @@ Area fields are type-to-search, not dropdowns: users type a few letters ("aki", 
 
 Ride, parcel and errand requests and depot runs are sorted by real distance from the driver's live GPS to the pickup point (or depot), shown as "📍 800 m away". If GPS isn't available, requests from the driver's chosen area come first. Drivers no longer need to keep updating the area dropdown.
 
+## Excel reports
+
+Desk → **Reports**. Pick a period (or tap Today, Last 7 days, This month, Last month), then download.
+
+| Report | Sheets | What it answers |
+|---|---|---|
+| **Rides and deliveries** | Trips · Day by day · Busiest routes · About | Every trip, parcel and errand; how each day went; which routes actually earn |
+| **Driver earnings** | Earnings · About | What each driver earned, commission taken, what is still owed to them, their bank details, subscription state |
+| **Depot packages** | Packages · Delivery runs · By depot · About | What arrived, what was collected or delivered, what came back, and the cash each driver owes a depot |
+| **Port Harcourt departures** | Departures · Passenger manifest · About | How full each vehicle was, seat revenue, and a printable manifest with next of kin |
+
+Depot packages can be narrowed to one depot, and Port Harcourt to one route.
+
+**Every workbook ends with an About sheet** naming the period, when it was generated, and what each tricky column counts — so a figure can still be explained a month later. Totals are live `SUM` formulas, not pasted numbers, so the sheet still adds up after rows are filtered or deleted.
+
+**Details worth knowing:**
+- Dates are Lagos time throughout. Rides are counted by the day they were **requested**; driver earnings by the day a trip was **completed**; packages by the day they were **registered**; departures by the day the vehicle **departs**.
+- Fare totals cover completed trips only. A cancelled trip still shows its quoted fare in the Trips sheet but is excluded from every total.
+- "Owed to driver now" and "Depot cash not handed in" are running figures, not limited to the period — they are what is outstanding today.
+- Every driver appears in the earnings report, including those who took no work, so you can see who has gone quiet.
+- Files are built in memory and streamed straight to the browser; nothing is written to disk on the server.
+
+The writer is `src/lib/xlsx.js`, about 200 lines using only Node's `zlib`. It was written rather than pulled from npm so the project keeps a clean `npm audit` — the usual Excel libraries drag in a dependency tree of their own.
+
 ## Phone alerts (push notifications)
 
 Without these, a driver only sees a request while the app is open on screen. With them the phone buzzes like any other app.
 
 **Switching them on (once, in Railway):**
 
-1. In this project folder run `npm run push:keys`. It prints three lines.
+1. In this project folder run `npm run push:keys`. It prints three lines. (The script uses only Node's own crypto, so it works in a freshly unzipped copy with nothing installed.)
 2. Paste all three into Railway → waka-bonny → **Variables** → Raw Editor:
    `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (an email address people can reach you on; Google and Apple use it if something goes wrong).
 3. Redeploy. Until these are set, nothing about alerts is shown anywhere in the app.
