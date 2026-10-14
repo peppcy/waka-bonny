@@ -12,6 +12,7 @@ const { clean } = require('../lib/util');
 const { km, byDistance } = require('../lib/geo');
 const { sendSms } = require('../lib/sms');
 const P = require('../lib/packages');
+const push = require('../lib/push');
 
 // A driver is busy if they have a ride/delivery in progress or a depot run
 const BUSY_SQL = `SELECT 1 FROM rides WHERE driver_id=$1 AND status IN ('accepted','arrived','started')
@@ -160,8 +161,16 @@ router.post('/rides/:id/accept', wrap(async (req, res) => {
   const r = (await q(`UPDATE rides SET driver_id=$1, status='accepted', accepted_at=now()
       WHERE id=$2 AND status='requested' AND vehicle_type=$3 RETURNING id`, [req.user.id, int(req.params.id), req.driver.vehicle_type])).rows[0];
   if (!r) throw bad('Another driver already took this ride.');
-  res.json({ ride: forDriver((await q(`${RIDE_SELECT} WHERE r.id=$1`, [r.id])).rows[0]) });
+  const full = (await q(`${RIDE_SELECT} WHERE r.id=$1`, [r.id])).rows[0];
+  res.json({ ride: forDriver(full) });
+  // The passenger may have put their phone away while waiting
+  push.notify([full.passenger_id], {
+    title: `${req.user.name.split(' ')[0]} is coming for you`,
+    body: `${VEH_NAME[req.driver.vehicle_type]} ${req.driver.plate} accepted your ${full.service === 'ride' ? 'trip' : 'request'}. Follow it on the map.`,
+    url: '/', tag: 'ride-' + r.id
+  });
 }));
+const VEH_NAME = { keke: 'Keke', okada: 'Okada', taxi: 'Taxi' };
 
 const TRANSITIONS = {
   arrived: { from: ['accepted'], set: `status='arrived'` },
@@ -182,10 +191,17 @@ router.post('/rides/:id/:action', wrap(async (req, res) => {
         : 'Wrong delivery code. Ask the customer for the 4-digit code shown in their app.');
     }
   }
-  const r = (await q(`UPDATE rides SET ${t.set} WHERE id=$1 AND driver_id=$2 AND status = ANY($3) RETURNING id`,
+  const r = (await q(`UPDATE rides SET ${t.set} WHERE id=$1 AND driver_id=$2 AND status = ANY($3) RETURNING id, passenger_id, service, fare, pay_method`,
     [int(req.params.id), req.user.id, t.from])).rows[0];
   if (!r) throw bad('This ride cannot be updated right now. Refresh and try again.');
   res.json({ ok: true });
+  const first = req.user.name.split(' ')[0];
+  const alert = {
+    arrived: { title: `${first} is outside`, body: `Your ${VEH_NAME[req.driver.vehicle_type].toLowerCase()} ${req.driver.plate} is waiting at the pickup point.`, sticky: true },
+    start: { title: 'Trip started', body: r.service === 'ride' ? 'You can follow the trip live on the map.' : 'Your delivery is on the way.' },
+    complete: { title: r.service === 'ride' ? 'Trip finished' : 'Delivered', body: r.pay_method === 'paystack' ? 'Already paid online. Thanks for riding with Waka Bonny.' : `Please pay ₦${Number(r.fare).toLocaleString('en-NG')} to ${first}.` }
+  }[req.params.action];
+  if (alert) push.notify([r.passenger_id], { ...alert, url: '/', tag: 'ride-' + r.id });
 }));
 
 // ---- Depot delivery runs ----
@@ -204,10 +220,15 @@ router.get('/run', wrap(async (req, res) => {
 router.post('/runs/:id/accept', wrap(async (req, res) => {
   if ((await q(BUSY_SQL, [req.user.id])).rows[0]) throw bad('Finish your current trip or run first.');
   await requireActiveSub(req.driver);
-  const r = (await q(`UPDATE runs SET driver_id=$1, status='accepted', accepted_at=now() WHERE id=$2 AND status='open' AND vehicle_type=$3 RETURNING id`,
+  const r = (await q(`UPDATE runs SET driver_id=$1, status='accepted', accepted_at=now() WHERE id=$2 AND status='open' AND vehicle_type=$3 RETURNING id, depot_id`,
     [req.user.id, int(req.params.id), req.driver.vehicle_type])).rows[0];
   if (!r) throw bad('Another driver already took this run.');
   res.json({ ok: true });
+  push.depotAgents(r.depot_id).then(ids => push.notify(ids, {
+    title: `Run #${r.id} taken`,
+    body: `${req.user.name} (${VEH_NAME[req.driver.vehicle_type]} ${req.driver.plate}) is coming to collect the packages.`,
+    url: '/?v=depot', tag: 'run-' + r.id
+  })).catch(() => {});
 }));
 
 async function myRun(req, statuses) {
@@ -264,6 +285,12 @@ router.post('/runs/:id/finish', wrap(async (req, res) => {
     FROM packages WHERE run_id=$1`, [r.id])).rows[0];
   await q(`UPDATE runs SET status='done', done_at=now(), fee_total=$1, cash_due=$2 WHERE id=$3`, [t.fees, t.due, r.id]);
   res.json({ ok: true, earned: t.fees, cash_to_depot: t.due, delivered: t.delivered, returned: t.returned, depot: r.depot_name });
+  // The depot needs to know the run is back, especially if there is cash or a returned package
+  push.depotAgents(r.depot_id).then(ids => push.notify(ids, {
+    title: `Run #${r.id} finished`,
+    body: `${req.user.name}: ${t.delivered} delivered${t.returned ? `, ${t.returned} returned` : ''}${t.due ? `, ₦${Number(t.due).toLocaleString('en-NG')} cash to hand in` : ''}.`,
+    url: '/?v=depot', tag: 'run-' + r.id
+  })).catch(() => {});
 }));
 
 router.get('/summary', wrap(async (req, res) => {

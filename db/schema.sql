@@ -337,3 +337,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS driver_docs_one_per_kind ON driver_docs(user_i
 
 -- When the user accepted the Terms of Use and Privacy Policy
 ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ;
+
+-- ===== Push notifications (one row per device a person has allowed) =====
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT UNIQUE NOT NULL,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  device TEXT,
+  failures INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_sent_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS push_user_idx ON push_subscriptions(user_id);
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS sub_warned_at TIMESTAMPTZ;

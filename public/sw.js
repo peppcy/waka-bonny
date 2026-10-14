@@ -1,6 +1,6 @@
 // Waka Bonny service worker: makes the app installable and loads the app shell fast on slow networks.
 // API calls and map tiles always go to the network (live data must never be served stale).
-const CACHE = 'waka-shell-v3';
+const CACHE = 'waka-shell-v4';
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.webmanifest', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
@@ -20,3 +20,41 @@ self.addEventListener('fetch', (e) => {
     }).catch(() => caches.match(e.request).then(r => r || caches.match('/')))
   );
 });
+
+// An alert from the server. Shown even when the app is closed.
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch { d = { body: e.data ? e.data.text() : '' }; }
+  const title = d.title || 'Waka Bonny';
+  e.waitUntil(self.registration.showNotification(title, {
+    body: d.body || '',
+    icon: d.icon || '/icons/icon-192.png',
+    badge: d.badge || '/icons/icon-192.png',
+    // Same tag replaces an older alert about the same thing instead of stacking up
+    tag: d.tag || 'waka',
+    renotify: d.renotify !== false,
+    requireInteraction: !!d.sticky,
+    vibrate: [180, 90, 180],
+    data: { url: d.url || '/' }
+  }));
+});
+
+// Tapping the alert opens the app on the right page, reusing the open window if there is one.
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const target = (e.notification.data && e.notification.data.url) || '/';
+  e.waitUntil((async () => {
+    const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of list) {
+      if (new URL(c.url).origin === location.origin) {
+        await c.focus();
+        if ('navigate' in c) { try { await c.navigate(target); } catch {} }
+        return;
+      }
+    }
+    await self.clients.openWindow(target);
+  })());
+});
+
+// Chrome can replace a subscription on its own; the app re-registers next time it opens.
+self.addEventListener('pushsubscriptionchange', () => {});

@@ -13,6 +13,7 @@ Stack: Node.js / Express / PostgreSQL. The frontend is plain HTML/JS in `public/
 - Share the trip by WhatsApp or SMS (public tracking link, no sign-in needed)
 - SOS button during the trip (goes to the admin Safety tab)
 - Confirm payment (cash or transfer) and rate the driver; report a problem
+- Phone alerts when a driver accepts, arrives, starts and finishes, even with the app closed
 - Street hail: scan the QR badge on a vehicle (or type its code) to verify the driver and record the trip
 - Bonny ⇄ Port Harcourt: browse departures, book 1–6 seats, next of kin captured for the manifest, cancel, SOS while on the road
 
@@ -21,6 +22,7 @@ Stack: Node.js / Express / PostgreSQL. The frontend is plain HTML/JS in `public/
 - Go online in an area, see requests (nearby ones first), accept (first to accept wins)
 - Arrived → start → end trip flow; release a job before pickup
 - Today's fares, trips and rating; printable QR badge
+- Phone alerts for new requests and depot runs, so the app does not have to stay open
 
 **Bus / Sienna drivers**
 - Publish departures (route, time, seats); blocked outside the road hours set by admin
@@ -34,6 +36,7 @@ Stack: Node.js / Express / PostgreSQL. The frontend is plain HTML/JS in `public/
 - Intercity seat prices per route (bus and Sienna), stops, all departures and manifests
 - SOS alerts with call and track buttons; complaints → strike or dismiss
 - Settings: night hours and surcharge, road opening hours, safety desk phone
+- Phone alerts for every SOS, on every admin's phone
 
 ## Before you launch: replace the placeholders
 
@@ -219,6 +222,40 @@ Area fields are type-to-search, not dropdowns: users type a few letters ("aki", 
 ## Nearest driver first
 
 Ride, parcel and errand requests and depot runs are sorted by real distance from the driver's live GPS to the pickup point (or depot), shown as "📍 800 m away". If GPS isn't available, requests from the driver's chosen area come first. Drivers no longer need to keep updating the area dropdown.
+
+## Phone alerts (push notifications)
+
+Without these, a driver only sees a request while the app is open on screen. With them the phone buzzes like any other app.
+
+**Switching them on (once, in Railway):**
+
+1. In this project folder run `npm run push:keys`. It prints three lines.
+2. Paste all three into Railway → waka-bonny → **Variables** → Raw Editor:
+   `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (an email address people can reach you on; Google and Apple use it if something goes wrong).
+3. Redeploy. Until these are set, nothing about alerts is shown anywhere in the app.
+
+Keep the private key. Changing it later signs **every** phone out of alerts and each person has to switch them on again.
+
+**What people do:** Account → **Turn on alerts**, allow the phone's prompt, then **Send a test alert** to be sure. Drivers and depot agents also see the same card at the top of their work screen. It can be turned off again on the same card, and signing out turns it off on that phone.
+
+**On iPhone this only works from the Home Screen.** Safari itself cannot receive alerts: the person must use Share → **Add to Home Screen** and open Waka Bonny from that icon. The app says so instead of showing a button that cannot work. Android Chrome works either way, in the browser or installed.
+
+**What gets sent:**
+
+| Event | Who hears it |
+|---|---|
+| Ride, parcel or errand requested | Every approved driver of that vehicle type who is online, seen in the last 10 minutes and not already on a job |
+| Driver accepted | The passenger |
+| Driver arrived / trip started / trip finished | The passenger |
+| Depot run created | The same free drivers of that vehicle type |
+| Driver took a run | That depot's agents |
+| Run finished | That depot's agents, with what was delivered, returned and owed in cash |
+| SOS during a trip | Every admin, on every phone they have alerts on |
+| Weekly subscription about to run out, or run out | That driver (once per week, and never if they pay automatically) |
+
+Tapping an alert opens the app on the right screen, reusing the window if it is already open.
+
+**Housekeeping, nothing to do:** an alert never blocks or slows the thing that triggered it. A phone that uninstalled the app or revoked permission is dropped the first time a push comes back as gone; one that keeps failing for another reason is dropped after ten tries. If someone reinstalls the app or you rotate the key, their phone re-registers itself the next time they open it.
 
 ## Not in this MVP (phase 2)
 

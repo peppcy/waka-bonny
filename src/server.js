@@ -33,6 +33,7 @@ app.use('/api/admin/broadcast', require('./routes/broadcast'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/pay', require('./routes/pay'));
 app.use('/api/depot', require('./routes/depot'));
+app.use('/api/push', require('./routes/push'));
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.use(express.static(path.join(__dirname, '..', 'public'), {
@@ -61,6 +62,14 @@ app.use((err, req, res, next) => {
     const run = () => purge().catch(e => console.error('Retention clean-up failed:', e.message));
     setTimeout(run, 60000);
     setInterval(run, 24 * 60 * 60 * 1000);
+  }
+  // Remind drivers whose weekly subscription is about to run out
+  {
+    const { remindExpiring } = require('./lib/subs');
+    const run = () => remindExpiring().then(r => { if (r.soon || r.expired) console.log('Subscription reminders sent:', JSON.stringify(r)); })
+      .catch(e => console.error('Subscription reminders failed:', e.message));
+    setTimeout(run, 120000);
+    setInterval(run, 12 * 60 * 60 * 1000);
   }
   // Pick up neighbourhood changes made in Hale without a redeploy
   if (process.env.HALE_API_URL) {

@@ -7,6 +7,9 @@ const { sendSms } = require('../lib/sms');
 const crypto = require('crypto');
 const { wrap, bad, int, clean, token, normalizePhone, HttpError } = require('../lib/util');
 const { coord, rideTrack, addPoint } = require('../lib/track');
+const push = require('../lib/push');
+const SERVICE_WORD = { ride: 'ride', parcel: 'parcel delivery', errand: 'errand' };
+const VEH_LABEL = { keke: 'Keke', okada: 'Okada', taxi: 'Taxi' };
 
 const TYPES = ['keke', 'okada', 'taxi'];
 const ACTIVE = ['requested', 'accepted', 'arrived', 'started'];
@@ -62,7 +65,14 @@ router.post('/', wrap(async (req, res) => {
     const link = `${(process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')}/?t=${r.token}`;
     sendSms(recPhone, `Waka Bonny: ${req.user.name.split(' ')[0]} is sending you a parcel. Your delivery code is ${deliveryCode}. Give it to the rider ONLY after you receive the parcel. Track it: ${link}`, { soft: true });
   }
-  res.json({ ride: await mine(r.id, req.user.id) });
+  const full = await mine(r.id, req.user.id);
+  res.json({ ride: full });
+  // Alert the free drivers of this vehicle type so they see the request without the app being open
+  push.freeDrivers(type).then(ids => push.notify(ids, {
+    title: `${VEH_LABEL[type] || 'New'} request · ${qt.fare ? '₦' + qt.fare.toLocaleString('en-NG') : ''}`.trim(),
+    body: `${full.from_name} → ${full.to_name}${service !== 'ride' ? ` (${SERVICE_WORD[service]})` : ''}. Open Waka Bonny to accept.`,
+    url: '/?v=driver', tag: 'req-' + r.id, sticky: true
+  })).catch(() => {});
 }));
 
 // Current ride, or a completed ride still waiting for payment confirmation
@@ -135,8 +145,14 @@ router.post('/:id/rate', wrap(async (req, res) => {
 
 router.post('/:id/sos', wrap(async (req, res) => {
   const r = await mine(int(req.params.id), req.user.id);
-  await q(`INSERT INTO sos_alerts(ride_id, user_id, note) VALUES($1,$2,$3)`, [r.id, req.user.id, clean(req.body?.note, 300)]);
+  const note = clean(req.body?.note, 300);
+  await q(`INSERT INTO sos_alerts(ride_id, user_id, note) VALUES($1,$2,$3)`, [r.id, req.user.id, note]);
   res.json({ ok: true });
+  push.admins().then(ids => push.notify(ids, {
+    title: '🚨 SOS from a trip',
+    body: `${req.user.name} (${req.user.phone}) on trip #${r.id}${note ? ': ' + note : ''}. Open the Desk now.`,
+    url: '/?v=admin', tag: 'sos-' + r.id, sticky: true, renotify: true
+  })).catch(() => {});
 }));
 
 router.post('/:id/complaint', wrap(async (req, res) => {

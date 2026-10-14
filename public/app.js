@@ -25,9 +25,11 @@ const S = {
   poll: null
 };
 
-async function api(path, { method = 'GET', body, auth = true } = {}) {
+async function api(path, { method = 'GET', body, auth = true, token } = {}) {
   const headers = { 'Content-Type': 'application/json' };
-  if (auth && S.token) headers.Authorization = 'Bearer ' + S.token;
+  // token is passed explicitly when signing out, where S.token has already been cleared
+  const t = token || S.token;
+  if (auth && t) headers.Authorization = 'Bearer ' + t;
   let res;
   try {
     res = await fetch(API + '/api' + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
@@ -448,7 +450,10 @@ function home() {
 }
 function signOut(msg = true) {
   GPS.stop(); S.auth = null;
-  S.token = null; S.user = null; localStorage.removeItem('waka_token'); try { sessionStorage.removeItem('waka_view'); } catch {}
+  // Stop alerts for the account being signed out, so the next person on this phone doesn't get them
+  if (S.token) pushDisable(S.token).catch(() => {});
+  S.token = null; S.user = null; localStorage.removeItem('waka_token');
+  try { sessionStorage.removeItem('waka_view'); sessionStorage.removeItem('waka_push_done'); } catch {}
   if (msg) toast('Signed out.');
   go('auth');
 }
@@ -570,6 +575,7 @@ async function viewAuth() {
 }
 
 function afterSignIn() {
+  pushRefresh();
   const p = new URLSearchParams(location.search);
   if (p.get('badge')) return viewBadge(p.get('badge'));
   home();
@@ -1031,8 +1037,107 @@ async function viewTrips() {
   $$('[data-c]').forEach(b => b.onclick = () => complainSheet(b.dataset.c));
 }
 
+// ---------- alerts (push notifications) ----------
+// Lets the server reach a phone while the app is closed: a driver hears a new request,
+// a passenger hears that their driver is outside.
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const isIos = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const installed = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+function b64ToBytes(s) {
+  const pad = '='.repeat((4 - s.length % 4) % 4);
+  const raw = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+async function swReady() {
+  if (!('serviceWorker' in navigator)) return null;
+  try { return await navigator.serviceWorker.ready; } catch { return null; }
+}
+
+async function pushState() {
+  const out = { supported: pushSupported(), permission: pushSupported() ? Notification.permission : 'unsupported', on: false, server: false, key: null };
+  try { const s = await api('/push'); out.server = s.enabled; out.key = s.key; } catch { return out; }
+  const reg = await swReady();
+  if (reg) { const sub = await reg.pushManager.getSubscription().catch(() => null); out.on = !!sub; }
+  return out;
+}
+
+async function pushEnable() {
+  if (!pushSupported()) throw new Error('This browser cannot show alerts. Use Chrome on Android, or add Waka Bonny to your Home Screen on iPhone.');
+  if (isIos() && !installed()) throw new Error('On iPhone, add Waka Bonny to your Home Screen first (Share → Add to Home Screen), then open it from there and switch alerts on.');
+  const { enabled, key } = await api('/push');
+  if (!enabled || !key) throw new Error('Alerts are not switched on for this app yet.');
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') throw new Error(perm === 'denied'
+    ? 'Alerts are blocked for this app. Allow notifications in your browser settings, then try again.'
+    : 'Alerts were not allowed.');
+  const reg = await swReady();
+  if (!reg) throw new Error('The app is not fully installed yet. Reload the page and try again.');
+  let sub = await reg.pushManager.getSubscription().catch(() => null);
+  // A subscription made with an older key is useless: replace it
+  if (sub) { try { await sub.unsubscribe(); } catch {} }
+  try {
+    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+  } catch (e) {
+    // The browser's own wording here ("Registration failed – push service error") means nothing to a driver
+    throw new Error('This phone could not be registered for alerts. Make sure you are not in a private window, that you are signed in to the browser, and that notifications are allowed for Waka Bonny, then try again.');
+  }
+  await api('/push/subscribe', { method: 'POST', body: { subscription: sub.toJSON(), device: navigator.userAgent } });
+  return sub;
+}
+
+async function pushDisable(token) {
+  const reg = await swReady();
+  const sub = reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
+  await api('/push/unsubscribe', { method: 'POST', token, body: sub ? { endpoint: sub.endpoint } : {} }).catch(() => {});
+  if (sub) { try { await sub.unsubscribe(); } catch {} }
+}
+
+// Re-register quietly whenever someone who already said yes opens the app,
+// so a reinstalled app or a rotated key fixes itself.
+async function pushRefresh() {
+  if (!S.user || !pushSupported() || Notification.permission !== 'granted') return;
+  if (sessionStorage.getItem('waka_push_done')) return;
+  try {
+    const { enabled, key } = await api('/push');
+    if (!enabled || !key) return;
+    const reg = await swReady(); if (!reg) return;
+    let sub = await reg.pushManager.getSubscription().catch(() => null);
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+    await api('/push/subscribe', { method: 'POST', body: { subscription: sub.toJSON(), device: navigator.userAgent } });
+    sessionStorage.setItem('waka_push_done', '1');
+  } catch {}
+}
+
+// A card for the Account page and the top of the driver and depot screens
+function pushCard(st, { compact = false } = {}) {
+  if (!st.server) return '';
+  const head = compact ? '' : '<h3>Alerts on this phone</h3>';
+  if (!st.supported) return `<div class="card">${head}<p class="muted small">This browser cannot show alerts. Use Chrome on Android, or Safari on iPhone with Waka Bonny added to the Home Screen.</p></div>`;
+  if (isIos() && !installed()) return `<div class="card">${head}<p class="small">To get alerts on iPhone, tap <b>Share</b> then <b>Add to Home Screen</b>, and open Waka Bonny from there.</p></div>`;
+  if (st.permission === 'denied') return `<div class="card">${head}<p class="small">Alerts are blocked for Waka Bonny in your phone's settings. Allow notifications for this app, then reload.</p></div>`;
+  if (st.on) return `<div class="card" id="pushCard">${head}
+    <p class="small">Alerts are <b>on</b> for this phone. ${compact ? '' : 'You will hear about trips and parcels even when the app is closed.'}</p>
+    <div class="row"><button class="btn ghost sm" data-push="test">Send a test alert</button><button class="btn ghost sm" data-push="off">Turn alerts off</button></div></div>`;
+  return `<div class="card" id="pushCard">${head}
+    <p class="small">${compact ? 'Turn on alerts so you hear new requests while the app is closed.' : 'Get a sound and a banner when a driver accepts your trip, or when a new request comes in — even when the app is closed.'}</p>
+    <button class="btn keke sm" data-push="on">Turn on alerts</button></div>`;
+}
+
+function bindPush(after) {
+  $$('[data-push]').forEach(b => b.onclick = () => act(b, async () => {
+    const what = b.dataset.push;
+    if (what === 'on') { await pushEnable(); toast('Alerts are on for this phone.'); }
+    else if (what === 'off') { await pushDisable(); toast('Alerts are off for this phone.'); }
+    else { await api('/push/test', { method: 'POST' }); toast('Test alert sent. Check your notifications.'); return; }
+    if (after) after();
+  }));
+}
+
 async function viewAccount() {
   const u = S.user;
+  const pst = await pushState();
   app.innerHTML = `<h1>Account</h1>
     <div class="card"><dl class="kv"><dt>Name</dt><dd>${esc(u.name)}</dd><dt>Phone</dt><dd>${esc(localPhone(u.phone))}</dd><dt>Account</dt><dd>${esc(u.role)}</dd></dl></div>
     <form id="acc" class="card"><label class="field"><span class="label">Emergency contact phone</span><input name="emergency_phone" type="tel" value="${esc(localPhone(u.emergency_phone))}"></label>
@@ -1043,11 +1148,13 @@ async function viewAccount() {
       <div class="row"><label class="field"><span class="label">New PIN</span><input name="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="new-password" required></label>
       <label class="field"><span class="label">Repeat new PIN</span><input name="pin_confirm" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="new-password" required></label></div>
       <button class="btn ghost" type="submit">Change PIN</button></form>
+    ${pushCard(pst)}
     <div class="card"><h3>Legal</h3>
       <div class="list">${[['terms', 'Terms of Use'], ['privacy', 'Privacy Policy'], ['refunds', 'Refund and Cancellation Policy']].map(([id, label]) =>
         `<button class="item" data-legal="${id}" style="text-align:left;cursor:pointer"><span>${esc(label)}</span><span class="muted">›</span></button>`).join('')}</div></div>
     <button class="btn ghost" id="out">Sign out</button>`;
   $$('[data-legal]').forEach(b => b.onclick = () => viewLegal(b.dataset.legal));
+  bindPush(() => viewAccount());
   $('#cpin').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { const b = Object.fromEntries(new FormData(e.target)); if (b.pin !== b.pin_confirm) throw new Error('The two new PINs do not match.'); await api('/auth/change-pin', { method: 'POST', body: b }); e.target.reset(); toast('PIN changed.'); }); };
   $('#acc').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { const out = await api('/auth/me', { method: 'PUT', body: Object.fromEntries(new FormData(e.target)) }); S.user = out.user; toast('Emergency contact saved.'); }); };
   $('#out').onclick = () => signOut();
@@ -1186,7 +1293,7 @@ function bindSub() {
 
 async function viewIslandDriver(d) {
   resetView();
-  const [sum, { ride }, sub, bankInfo, { run }, docInfo] = await Promise.all([api('/driver/summary'), api('/driver/active'), api('/driver/subscription'), api('/driver/bank'), api('/driver/run'), api('/driver/docs')]);
+  const [sum, { ride }, sub, bankInfo, { run }, docInfo, pst] = await Promise.all([api('/driver/summary'), api('/driver/active'), api('/driver/subscription'), api('/driver/bank'), api('/driver/run'), api('/driver/docs'), pushState()]);
   const { bank, commission_pct: commissionPct } = bankInfo;
   if (run) return renderRun(d, run, sum);
   // GPS: every 4s on a job (screen kept awake), every 15s while waiting online, off when offline
@@ -1230,6 +1337,7 @@ async function viewIslandDriver(d) {
   app.innerHTML = `
     ${ride || d.online ? '<div id="gpsNote" class="notice gps-note"></div>' : ''}
     ${subCard(sub)}
+    ${ride ? '' : pushCard(pst, { compact: true })}
     <div class="toggle ${d.online ? 'on' : 'off'}"><span>${d.online ? "You're online" : "You're offline"}</span>
       <button class="switch" role="switch" aria-checked="${d.online}" aria-label="Online" id="onl"></button></div>
     <label class="field"><span class="label">Area you're in now</span>${zoneField('zone', d.zone_id)}</label>
@@ -1240,7 +1348,7 @@ async function viewIslandDriver(d) {
     ${ride ? '' : bankCard(bank, commissionPct)}
     ${ride ? '' : docsCard(docInfo.kinds, docInfo.docs)}
     <button class="link" id="badge">Show my QR badge</button>`;
-  bindSub(); bindBank(); bindDocs(() => viewDriver());
+  bindSub(); bindBank(); bindDocs(() => viewDriver()); bindPush(() => viewDriver());
   $('#onl').onclick = (e) => act(e.target, async () => { await api('/driver/online', { method: 'POST', body: { online: !d.online, zone_id: $('#zone').value } }); viewDriver(); });
   $('#zone').onchange = () => api('/driver/online', { method: 'POST', body: { online: d.online, zone_id: $('#zone').value } }).then(() => toast('Area updated.')).catch(fail);
   $('#badge').onclick = () => badgeSheet(d);
@@ -1398,8 +1506,10 @@ async function viewDepot() {
       <div class="stat"><b>${c.out}</b><span>Out on runs</span></div><div class="stat"><b>${c.done_today}</b><span>Handed over today</span></div>
       ${me.cash_due_from_drivers ? `<div class="stat"><b>${naira(me.cash_due_from_drivers)}</b><span>Cash due from drivers</span></div>` : ''}
       ${c.returned ? `<div class="stat"><b>${c.returned}</b><span>Returned, not checked in</span></div>` : ''}</div>
+    ${pushCard(await pushState(), { compact: true })}
     <div class="seg" role="tablist">${DEPOT_TABS.map(([k, l]) => `<button data-dt="${k}" aria-pressed="${S.depotTab === k}">${l}</button>`).join('')}</div>
     <div id="dtab" class="list"></div>`;
+  bindPush(() => viewDepot());
   $$('[data-dt]').forEach(b => b.onclick = () => { S.depotTab = b.dataset.dt; stopPoll(); viewDepot().catch(fail); });
   const T = { add: dpAdd, collect: dpCollect, deliver: dpDeliver, runs: dpRuns };
   await T[S.depotTab]($('#dtab'), me);
@@ -2113,19 +2223,23 @@ async function adSettings(el) {
 // ---------- boot ----------
 async function loadMeta() { S.meta = await api('/public/meta', { auth: false }); }
 
-if ('serviceWorker' in navigator && location.protocol === 'https:') {
+// Service workers only run on a secure origin; localhost counts as one, which is what makes local testing possible
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 }
 
 (async function boot() {
   try { await loadMeta(); } catch (e) { app.innerHTML = `<div class="notice bad">Can't reach the Waka Bonny server. Check your connection and reload.</div>`; return; }
   const p = new URLSearchParams(location.search);
-  if (S.token) { try { S.user = (await api('/auth/me')).user; } catch { S.user = null; } }
+  if (S.token) { try { S.user = (await api('/auth/me')).user; pushRefresh(); } catch { S.user = null; } }
   if (p.get('pay') && S.user) return handlePayReturn(p.get('pay'));
   if (p.get('legal')) return viewLegal(p.get('legal'));
   if (p.get('t')) return viewShare(p.get('t'));
   if (p.get('p')) return viewPackage(p.get('p'));
   if (p.get('badge')) return viewBadge(p.get('badge'));
+  // Tapping an alert can ask for a particular screen (?v=driver, ?v=depot, ?v=admin)
+  const want = p.get('v');
+  if (want && S.user && menuFor().some(([k]) => k === want)) return go(want);
   home();
 })();
 })();

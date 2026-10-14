@@ -4,6 +4,7 @@ const { q, tx } = require('../lib/db');
 const { auth } = require('../lib/auth');
 const { wrap, bad, int, clean, normalizePhone, HttpError } = require('../lib/util');
 const P = require('../lib/packages');
+const push = require('../lib/push');
 
 router.use(auth('agent', 'admin'));
 
@@ -151,6 +152,12 @@ router.post('/runs', wrap(async (req, res) => {
     return r;
   });
   res.json({ run });
+  // Alert free drivers of that vehicle type that a paid delivery run is waiting
+  push.freeDrivers(type).then(driverIds => push.notify(driverIds, {
+    title: `📦 Depot run · ₦${Number(run.fee_total).toLocaleString('en-NG')}`,
+    body: `${ids.length} package${ids.length === 1 ? '' : 's'} to deliver from ${req.depot.name}. Open Waka Bonny to take it.`,
+    url: '/?v=driver', tag: 'run-' + run.id, sticky: true
+  })).catch(() => {});
 }));
 
 router.get('/runs', wrap(async (req, res) => {

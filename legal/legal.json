@@ -163,6 +163,7 @@
       "Port Harcourt bookings: the traveller's name and phone number and a next of kin with their phone number, for the operator's manifest.",
       "Depot packages: the recipient's name and phone number, a description of the item, the charge, and the delivery address if delivery is requested.",
       "Messages: the SMS we send you, and messages we send to groups of users.",
+      "Phone alerts: if you switch them on, an address your phone's maker (Google or Apple) gives us so we can send alerts to that phone, and a note of the phone type. It is not an advertising identifier and we cannot read anything on your phone with it.",
       "Technical information: the device and browser you use, your IP address, and server logs, which we use to keep the service working and secure."
      ]
     ],
@@ -174,6 +175,7 @@
       "To confirm your phone number by SMS, which protects you and other users from false accounts. This is necessary to perform our contract and in our legitimate interest.",
       "To use your location. The app asks your permission first, and you can refuse or withdraw it in your phone settings. Without it, the map cannot show where you are, but you can still book by choosing an area.",
       "To keep accounting and tax records, and to answer the police, the courts or a regulator where the law requires it. This is a legal obligation.",
+      "To send alerts to your phone about your own trips, deliveries or driver fees. You choose whether to switch these on, and you can switch them off in the app or in your phone settings at any time. This is based on your consent.",
       "To tell you about the service by SMS, such as a change to fares or to driver fees. This is in our legitimate interest in running the service. We do not sell your details and we do not send advertising on behalf of other companies."
      ]
     ],
@@ -185,7 +187,7 @@
       "For a Port Harcourt seat, the operator sees the manifest, including the next of kin you gave.",
       "For a depot package, the depot's staff see your name, phone number, item and charge.",
       "Anyone you send a trip-tracking link to can see that trip's route, the driver's name and the vehicle, until the trip ends.",
-      "Our service providers: Paystack for payments, our SMS provider for text messages, MapTiler and OpenStreetMap for maps, and Railway for hosting the app and its database. They act on our instructions.",
+      "Our service providers: Paystack for payments, our SMS provider for text messages, MapTiler and OpenStreetMap for maps, Railway for hosting the app and its database, and Google or Apple for delivering phone alerts to your device. They act on our instructions.",
       "The riders' association or union desk, where a complaint or safety incident concerns one of their members.",
       "The police, emergency services, a court or a regulator, where the law requires it or where someone's safety is at risk."
      ]
@@ -199,6 +201,7 @@
       "Driver documents: while your account is open. They are deleted when you replace them or when the account is deleted.",
       "Safety reports, SOS alerts and complaints: 3 years.",
       "SMS codes used to sign in: a few days, then deleted.",
+      "Phone alert addresses: until you switch alerts off, sign out, or your phone stops accepting them, whichever comes first.",
       "Account details: while your account is open. When an account is deleted, we remove the name, phone number, PIN, emergency contact, documents and saved locations, and keep the remaining records in anonymous form."
      ]
     ],

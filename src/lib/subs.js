@@ -48,4 +48,27 @@ async function startSubscriptionsForAll() {
   return r.rowCount;
 }
 
-module.exports = { subState, requireActiveSub, extendWeeks, subSettings, startSubscriptionsForAll };
+// Once a day: warn drivers whose week runs out in the next 2 days, and tell those
+// whose week has just run out. sub_warned_at stops the same driver being told twice.
+async function remindExpiring() {
+  const { mode, amount } = await subSettings();
+  if (mode !== 'on' || !(amount > 0)) return { soon: 0, expired: 0 };
+  const push = require('./push');
+  if (!push.enabled()) return { soon: 0, expired: 0 };
+  const rows = (await q(`SELECT d.user_id, d.sub_paid_until, d.sub_auto, (d.sub_paid_until < now()) AS expired
+      FROM drivers d JOIN users u ON u.id=d.user_id
+      WHERE d.status='approved' AND u.deleted_at IS NULL AND u.banned_at IS NULL
+        AND NOT d.sub_auto AND d.sub_paid_until IS NOT NULL
+        AND d.sub_paid_until < now() + interval '2 days'
+        AND (d.sub_warned_at IS NULL OR d.sub_warned_at < d.sub_paid_until - interval '2 days')`)).rows;
+  const money = '₦' + amount.toLocaleString('en-NG');
+  let soon = 0, expired = 0;
+  for (const r of rows) {
+    if (r.expired) { expired++; push.notify([r.user_id], { title: 'Your subscription has expired', body: `Renew your ${money} weekly subscription to go back online and take trips.`, url: '/?v=driver', tag: 'sub', sticky: true }); }
+    else { soon++; push.notify([r.user_id], { title: 'Your week is almost up', body: `Renew your ${money} weekly subscription so you can keep taking trips.`, url: '/?v=driver', tag: 'sub' }); }
+    await q('UPDATE drivers SET sub_warned_at=now() WHERE user_id=$1', [r.user_id]);
+  }
+  return { soon, expired };
+}
+
+module.exports = { subState, requireActiveSub, extendWeeks, subSettings, startSubscriptionsForAll, remindExpiring };
