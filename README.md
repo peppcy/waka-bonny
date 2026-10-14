@@ -89,6 +89,7 @@ npm run dev               # http://localhost:3000
 ## Maps
 
 - Default view is **Streets**. Switch to **Satellite** with the 🗺️ button; the choice is remembered.
+- Defaults with a MapTiler key: **Streets** (`streets-v2`) and **Satellite Hybrid** (`hybrid`), which keeps road and place names over the imagery. Desk → Settings → **Maps** has a **Test map tiles** button that loads a real tile of Bonny from each map and says whether it works, so you never have to guess at a name.
 - With `MAPTILER_KEY` set, tiles come from **MapTiler**. Without it, the free OpenStreetMap and Esri layers are used. If MapTiler tiles fail to load (wrong map name for your plan, key restricted to another domain, quota reached), the app quietly falls back to the free layers, so the map is never blank.
 - The MapTiler key is visible in the browser, as all web map keys are. **Restrict it to your own domain** in the MapTiler dashboard. If the default map names are not on your plan, paste the exact tile URLs from your MapTiler maps page into `MAPTILER_STREETS_URL` and `MAPTILER_SATELLITE_URL`.
 - The map centres itself once, then never changes the user's zoom. It follows the vehicle by panning only, pauses while the user is touching the map, and stops following if the user drags away (tap **Recenter** to resume).

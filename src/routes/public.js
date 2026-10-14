@@ -15,7 +15,9 @@ function mapConfig() {
   return {
     provider: 'maptiler',
     streets: withKey(process.env.MAPTILER_STREETS_URL || `https://api.maptiler.com/maps/${process.env.MAPTILER_STREETS_STYLE || 'streets-v2'}/256/{z}/{x}/{y}.png`),
-    satellite: withKey(process.env.MAPTILER_SATELLITE_URL || `https://api.maptiler.com/maps/${process.env.MAPTILER_SATELLITE_STYLE || 'satellite'}/256/{z}/{x}/{y}.jpg`)
+    // "Satellite Hybrid" keeps road and place names over the imagery, which is what helps
+    // a driver find an address. Use MAPTILER_SATELLITE_URL for plain imagery instead.
+    satellite: withKey(process.env.MAPTILER_SATELLITE_URL || `https://api.maptiler.com/maps/${process.env.MAPTILER_SATELLITE_STYLE || 'hybrid'}/256/{z}/{x}/{y}.jpg`)
   };
 }
 

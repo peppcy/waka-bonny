@@ -2024,6 +2024,10 @@ async function adSettings(el) {
       <span class="muted small">Switching to weekly gives every driver the free trial days below, counted from the day you switch, so nobody is locked out suddenly.</span></label>
     ${f('campaign_end', 'Campaign end (optional, shown to drivers)', 'e.g. 31 December 2026. Leave empty to show no date.')}
     <div class="row">${f('weekly_subscription', 'Weekly fee (₦)', 'Kept ready for when you switch to weekly.', 'number')}${f('subscription_trial_days', 'Free trial (days)', 'Given to every driver on the day you switch.', 'number')}</div>
+    <h3>Maps</h3>
+    <div class="card" id="mapTest"><p class="small">Map tiles: <b>${(S.meta.settings.maps || {}).provider === 'maptiler' ? 'MapTiler' : 'OpenStreetMap and Esri (free)'}</b>.
+      ${(S.meta.settings.maps || {}).provider === 'maptiler' ? 'If a map fails to load, the app falls back to the free maps on its own.' : 'Set MAPTILER_KEY in Railway to use your MapTiler account.'}</p>
+      <button class="btn ghost sm" type="button" id="mapCheck">Test map tiles</button><div id="mapRes" class="list" style="margin-top:.6rem"></div></div>
     <h3>Driver documents</h3>
     <label class="field"><span class="label">Before a driver can be approved</span><select name="require_driver_docs">
       <option value="" ${s.require_driver_docs === 'on' ? '' : 'selected'}>Documents are optional (check them at the desk)</option>
@@ -2032,6 +2036,31 @@ async function adSettings(el) {
     <h3>Safety</h3>
     ${f('safety_desk_phone', 'Safety desk phone (234…)', 'Shown on every SOS screen.', 'tel')}
     <button class="btn" type="submit">Save settings</button></form>`;
+  // Loads one real tile of Bonny Island from each map so you can see which names work
+  $('#mapCheck').onclick = (e) => act(e.target, async () => {
+    const cfg = S.meta.settings.maps || {};
+    const maps = cfg.provider === 'maptiler' ? { Streets: cfg.streets, Satellite: cfg.satellite }
+      : { Streets: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', Satellite: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}' };
+    const tile = { z: 12, x: 2129, y: 1997 };   // the tile covering Bonny Island
+    const check = (url) => new Promise(done => {
+      const img = new Image(); let settled = false;
+      const end = (okTile) => { if (!settled) { settled = true; done(okTile); } };
+      img.onload = () => end(img.naturalWidth > 0); img.onerror = () => end(false);
+      setTimeout(() => end(false), 12000);
+      img.src = url.replace('{z}', tile.z).replace('{x}', tile.x).replace('{y}', tile.y);
+    });
+    const out = [];
+    for (const [name, url] of Object.entries(maps)) {
+      const good = await check(url);
+      const shown = url.replace(/key=[^&]+/, 'key=…');
+      out.push(`<div class="item small"><span>${esc(name)}<br><span class="muted">${esc(shown)}</span></span>
+        <span class="tag ${good ? 'ok' : 'bad'}">${good ? 'loads' : 'not loading'}</span></div>`);
+    }
+    $('#mapRes').innerHTML = out.join('') + (out.some(x => x.includes('not loading'))
+      ? '<p class="small stale">A map that is not loading means the name is not on your MapTiler plan, or the key is restricted to another domain. Open that map in MapTiler, copy its raster tile URL, and set MAPTILER_STREETS_URL or MAPTILER_SATELLITE_URL in Railway. Until then the free map is used.</p>'
+      : '<p class="small muted">Both maps load.</p>');
+  });
+
   $('#setf').onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => {
     const body = Object.fromEntries(new FormData(e.target));
     if (body.safety_desk_phone) body.safety_desk_phone = body.safety_desk_phone.replace(/\D/g, '').replace(/^0/, '234');
