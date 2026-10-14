@@ -88,7 +88,9 @@ npm run dev               # http://localhost:3000
 
 ## Maps
 
-- Default view is **Streets** (OpenStreetMap). Switch to **Satellite** with the 🗺️ button; the choice is remembered.
+- Default view is **Streets**. Switch to **Satellite** with the 🗺️ button; the choice is remembered.
+- With `MAPTILER_KEY` set, tiles come from **MapTiler**. Without it, the free OpenStreetMap and Esri layers are used. If MapTiler tiles fail to load (wrong map name for your plan, key restricted to another domain, quota reached), the app quietly falls back to the free layers, so the map is never blank.
+- The MapTiler key is visible in the browser, as all web map keys are. **Restrict it to your own domain** in the MapTiler dashboard. If the default map names are not on your plan, paste the exact tile URLs from your MapTiler maps page into `MAPTILER_STREETS_URL` and `MAPTILER_SATELLITE_URL`.
 - The map centres itself once, then never changes the user's zoom. It follows the vehicle by panning only, pauses while the user is touching the map, and stops following if the user drags away (tap **Recenter** to resume).
 - World map: users see their real position wherever they are (blue dot plus a pale circle showing GPS accuracy).
 - **Full screen** button for passengers watching a trip.
@@ -151,6 +153,15 @@ Use it to warn drivers before the launch campaign ends, to announce new areas or
 - When a customer chooses **Transfer** after a trip, they see that driver's bank, account number and verified account name with a **Copy** button. Bus/Sienna passengers see the same under their booking. Details are only shown to that driver's own customers.
 - The same account appears in Desk → Drivers and Desk → Payments. It is also the account Paystack settles online fares to (see **split payments** above).
 - Sign-up records who owns the vehicle: the driver, or a named owner with their phone.
+
+## Driver documents
+
+Drivers photograph four things in the app: **photo ID**, **vehicle papers**, **association or union permit**, and a **photo of the vehicle with its plate visible**. The phone shrinks each picture before sending it (long side 1400px, JPEG), so a 4MB photo arrives as roughly 70–200KB — important on a Bonny connection.
+
+- Drivers can add documents while still waiting for verification, and replace any that are rejected.
+- You review them in Desk → **Drivers → Open**: each image is shown full size with **Approve** or **Reject**. A rejection needs a reason, and the driver sees it on their Work screen.
+- Desk → Settings → **Driver documents** decides whether every document must be approved before a driver can be approved at all. It is **optional by default**, so the launch campaign isn't held up; switch it on when you're ready.
+- Images are kept in the database and are never public: the app shows them through a signed link that expires after 20 minutes. Deleting a driver erases their documents with the rest of their personal data.
 
 ## Managing users (platform owner)
 

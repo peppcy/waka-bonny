@@ -20,6 +20,7 @@ router.get('/overview', wrap(async (req, res) => {
         COALESCE(sum(fare) FILTER (WHERE status='completed' AND (completed_at AT TIME ZONE 'Africa/Lagos')::date = (now() AT TIME ZONE 'Africa/Lagos')::date),0)::int AS value_today FROM rides`),
     intercity: await one(`SELECT count(*) FILTER (WHERE status IN ('scheduled','boarding'))::int AS upcoming,
         count(*) FILTER (WHERE status='departed')::int AS on_road FROM departures`),
+    docs_pending: (await one(`SELECT count(*)::int AS n FROM driver_docs WHERE status='pending'`)).n,
     safety: await one(`SELECT (SELECT count(*) FROM sos_alerts WHERE NOT resolved)::int AS sos,
         (SELECT count(*) FROM complaints WHERE status='open')::int AS complaints`),
     payments: await one(`SELECT COALESCE(sum(amount) FILTER (WHERE status='success' AND (paid_at AT TIME ZONE 'Africa/Lagos')::date = (now() AT TIME ZONE 'Africa/Lagos')::date),0)::int AS online_today,
@@ -32,6 +33,9 @@ router.get('/overview', wrap(async (req, res) => {
 router.get('/drivers', wrap(async (req, res) => {
   const status = req.query.status;
   const rows = (await q(`SELECT u.id, u.name, u.phone, u.created_at, d.*, z.name AS zone_name, (d.sub_paid_until > now()) AS sub_active,
+      (SELECT count(*) FROM driver_docs dd WHERE dd.user_id=u.id)::int AS docs_total,
+      (SELECT count(*) FROM driver_docs dd WHERE dd.user_id=u.id AND dd.status='approved')::int AS docs_ok,
+      (SELECT count(*) FROM driver_docs dd WHERE dd.user_id=u.id AND dd.status='pending')::int AS docs_pending,
       (d.online AND d.last_seen > now() - interval '2 minutes') AS live
     FROM drivers d JOIN users u ON u.id=d.user_id LEFT JOIN zones z ON z.id=d.zone_id
     WHERE ($1::text IS NULL OR d.status=$1) ORDER BY u.created_at DESC LIMIT 200`, [status || null])).rows;
@@ -48,7 +52,16 @@ router.post('/drivers/:id/:action', wrap(async (req, res) => {
   const d = (await q('SELECT * FROM drivers WHERE user_id=$1', [id])).rows[0];
   if (!d) throw new HttpError(404, 'Driver not found.');
   switch (req.params.action) {
-    case 'approve': await q(`UPDATE drivers SET status='approved' WHERE user_id=$1`, [id]); break;
+    case 'approve': {
+      // When documents are required, every one of them must be approved before the driver is
+      const { value: need } = (await q(`SELECT value FROM settings WHERE key='require_driver_docs'`)).rows[0] || {};
+      if (need === 'on') {
+        const n = (await q(`SELECT count(*) FILTER (WHERE status='approved')::int AS ok, count(*)::int AS total FROM driver_docs WHERE user_id=$1`, [id])).rows[0];
+        if (n.ok < 4) throw bad(`This driver has ${n.ok} of 4 documents approved. Approve their documents first, or switch off "every document must be approved" in Settings.`);
+      }
+      await q(`UPDATE drivers SET status='approved' WHERE user_id=$1`, [id]);
+      break;
+    }
     case 'reject': await q(`UPDATE drivers SET status='rejected', online=false WHERE user_id=$1`, [id]); break;
     case 'suspend': await suspend(id); break;
     case 'reinstate': await q(`UPDATE drivers SET status='approved', strikes=0 WHERE user_id=$1`, [id]); break;
@@ -254,7 +267,7 @@ router.delete('/depots/:id/agents/:uid', wrap(async (req, res) => {
 }));
 
 // ---- Settings ----
-const EDITABLE = ['night_start_hour', 'night_end_hour', 'night_surcharge', 'intercity_open_hour', 'intercity_close_hour', 'safety_desk_phone', 'weekly_subscription', 'subscription_trial_days', 'parcel_fee', 'errand_fee', 'subscription_mode', 'campaign_end', 'platform_commission_pct', 'paystack_fee_bearer'];
+const EDITABLE = ['night_start_hour', 'night_end_hour', 'night_surcharge', 'intercity_open_hour', 'intercity_close_hour', 'safety_desk_phone', 'weekly_subscription', 'subscription_trial_days', 'parcel_fee', 'errand_fee', 'subscription_mode', 'campaign_end', 'platform_commission_pct', 'paystack_fee_bearer', 'require_driver_docs'];
 router.get('/settings', wrap(async (req, res) => {
   const rows = (await q('SELECT key, value FROM settings')).rows;
   res.json({ settings: Object.fromEntries(rows.map(r => [r.key, r.value])) });

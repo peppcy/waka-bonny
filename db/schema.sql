@@ -318,3 +318,19 @@ CREATE TABLE IF NOT EXISTS broadcasts (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at TIMESTAMPTZ
 );
+
+-- ===== Driver documents (ID, vehicle papers, permit, photo) =====
+CREATE TABLE IF NOT EXISTS driver_docs (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('id','vehicle','permit','photo')),
+  mime TEXT NOT NULL,
+  bytes BYTEA NOT NULL,
+  size INT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+  note TEXT,
+  reviewed_by INT REFERENCES users(id),
+  reviewed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS driver_docs_one_per_kind ON driver_docs(user_id, kind);

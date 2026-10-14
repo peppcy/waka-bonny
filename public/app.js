@@ -168,15 +168,44 @@ const agoText = (t) => { if (!t) return ''; const s = Math.max(0, Math.round((Da
 
 // Base maps. Satellite (Esri World Imagery, no key needed) shows Bonny's buildings and roads far better than
 // OpenStreetMap, which has little street data for the island. The choice is remembered on the phone.
-function baseLayers() {
+// Free fallbacks, used when no MapTiler key is set and whenever MapTiler tiles fail to load
+function freeLayers() {
   const esri = (svc) => `https://server.arcgisonline.com/ArcGIS/rest/services/${svc}/MapServer/tile/{z}/{y}/{x}`;
-  const satellite = L.layerGroup([
-    L.tileLayer(esri('World_Imagery'), { maxNativeZoom: 18, maxZoom: 20, attribution: 'Imagery © Esri, Maxar' }),
-    L.tileLayer(esri('Reference/World_Transportation'), { maxNativeZoom: 18, maxZoom: 20, opacity: .9 }),
-    L.tileLayer(esri('Reference/World_Boundaries_and_Places'), { maxNativeZoom: 18, maxZoom: 20 })
-  ]);
-  const streets = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxNativeZoom: 19, maxZoom: 20, attribution: '© OpenStreetMap contributors', referrerPolicy: 'strict-origin-when-cross-origin' });
-  return { 'Streets': streets, 'Satellite': satellite };
+  return {
+    streets: () => L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxNativeZoom: 19, maxZoom: 20, attribution: '© OpenStreetMap contributors', referrerPolicy: 'strict-origin-when-cross-origin' }),
+    satellite: () => L.layerGroup([
+      L.tileLayer(esri('World_Imagery'), { maxNativeZoom: 18, maxZoom: 20, attribution: 'Imagery © Esri, Maxar' }),
+      L.tileLayer(esri('Reference/World_Transportation'), { maxNativeZoom: 18, maxZoom: 20, opacity: .9 }),
+      L.tileLayer(esri('Reference/World_Boundaries_and_Places'), { maxNativeZoom: 18, maxZoom: 20 })
+    ])
+  };
+}
+
+// A MapTiler layer that quietly swaps itself for the free one if its tiles don't load
+// (wrong style name on the account, key restricted to another domain, quota reached).
+function maptilerLayer(url, attribution, fallback, map) {
+  const layer = L.tileLayer(url, { maxNativeZoom: 20, maxZoom: 20, attribution, crossOrigin: true });
+  let bad = 0, swapped = false;
+  layer.on('tileerror', () => {
+    if (swapped || ++bad < 4) return;
+    swapped = true;
+    console.warn('MapTiler tiles are not loading; using the free map instead.');
+    const alt = fallback();
+    if (map.hasLayer(layer)) { map.removeLayer(layer); alt.addTo(map); }
+    layer._wakaAlt = alt;
+  });
+  return layer;
+}
+
+function baseLayers(map) {
+  const free = freeLayers();
+  const cfg = (S.meta.settings && S.meta.settings.maps) || { provider: 'osm' };
+  if (cfg.provider !== 'maptiler') return { 'Streets': free.streets(), 'Satellite': free.satellite() };
+  const credit = '© <a href="https://www.maptiler.com/copyright/" target="_blank" rel="noopener">MapTiler</a> © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>';
+  return {
+    'Streets': maptilerLayer(cfg.streets, credit, free.streets, map),
+    'Satellite': maptilerLayer(cfg.satellite, credit, free.satellite, map)
+  };
 }
 
 // selfVehicle: this phone is inside the vehicle (passenger during the trip), so its own GPS moves the vehicle icon.
@@ -185,7 +214,7 @@ function liveMap(el, metaEl, { icon = '🛺', showMe = true, selfVehicle = false
   // World map: users anywhere (Bonny, Port Harcourt, Lagos, abroad) see their real position.
   const m = L.map(el, { zoomControl: true, minZoom: 2, maxZoom: 20, zoomSnap: 0.5, tap: true, worldCopyJump: true }).setView(BONNY, 14);
   el._wakaMap = m;
-  const layers = baseLayers();
+  const layers = baseLayers(m);
   let saved = null; try { saved = localStorage.getItem('waka_map'); } catch {}
   (layers[saved] || layers.Streets).addTo(m);
   L.control.layers(layers, null, { position: 'topright', collapsed: true }).addTo(m);
@@ -292,6 +321,34 @@ function getPos(timeout = 7000) {
     if (!navigator.geolocation) return res(null);
     navigator.geolocation.getCurrentPosition(p => res(p.coords), () => res(null), { enableHighAccuracy: true, timeout, maximumAge: 30000 });
   });
+}
+
+// ---------- photos ----------
+// Phones take very large pictures and Bonny connections are slow, so each photo is shrunk
+// in the browser before it is sent: long side 1400px, JPEG. A 4MB picture becomes ~200KB.
+async function shrinkPhoto(file, max = 1400, quality = 0.75) {
+  if (!/^image\//.test(file.type)) throw new Error('Choose a photo.');
+  if (file.size > 25 * 1024 * 1024) throw new Error('That photo is too big. Take a new one.');
+  let bmp;
+  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+  catch { bmp = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => no(new Error('That photo could not be opened.')); i.src = URL.createObjectURL(file); }); }
+  const w = bmp.width, h = bmp.height, scale = Math.min(1, max / Math.max(w, h));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w * scale)); c.height = Math.max(1, Math.round(h * scale));
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  if (bmp.close) bmp.close();
+  // A photographed document is normally well under 100KB. A busy or noisy picture can be far
+  // bigger, so step the quality (then the size) down rather than store a huge file.
+  let out = c.toDataURL('image/jpeg', quality);
+  if (out.length > 600_000) out = c.toDataURL('image/jpeg', 0.6);
+  if (out.length > 1_200_000) {
+    const s2 = 1000 / Math.max(c.width, c.height);
+    const c2 = document.createElement('canvas');
+    c2.width = Math.round(c.width * s2); c2.height = Math.round(c.height * s2);
+    c2.getContext('2d').drawImage(c, 0, 0, c2.width, c2.height);
+    out = c2.toDataURL('image/jpeg', 0.6);
+  }
+  return out;
 }
 
 // ---------- driver GPS sender ----------
@@ -972,8 +1029,9 @@ async function viewDriver() {
     app.innerHTML = `<div class="card"><h2>${msg[0]}</h2><p class="muted">${msg[1]}</p>
       <dl class="kv"><dt>Vehicle</dt><dd>${VEH_ICON[d.vehicle_type]} ${VEH[d.vehicle_type]}</dd><dt>Plate</dt><dd>${esc(d.plate)}</dd><dt>Permit</dt><dd>${esc(d.permit_no)}</dd></dl></div>
       ${d.status === 'pending' ? (b => bankCard(b.bank, b.commission_pct))(await api('/driver/bank')) : ''}
+      ${['pending', 'rejected'].includes(d.status) ? (i => docsCard(i.kinds, i.docs))(await api('/driver/docs')) : ''}
       <button class="btn ghost" id="refresh">Check again</button>`;
-    bindBank();
+    bindBank(); bindDocs(() => viewDriver());
     $('#refresh').onclick = () => viewDriver().catch(fail);
     return;
   }
@@ -1051,6 +1109,37 @@ document.addEventListener('click', async (e) => {
   try { await navigator.clipboard.writeText(b.dataset.copy); toast('Account number copied.'); } catch { toast('Copy failed. Select the number instead.', true); }
 });
 
+// Documents the association checks before a driver is verified
+const DOC_TAG = { approved: ['Approved', 'ok'], pending: ['Waiting for review', 'warn'], rejected: ['Rejected', 'bad'] };
+function docsCard(kinds, list) {
+  const byKind = Object.fromEntries(list.map(d => [d.kind, d]));
+  const done = list.filter(d => d.status === 'approved').length;
+  return `<div class="card"><div class="row" style="align-items:center"><h3>📄 Your documents</h3>
+      <span class="tag ${done === Object.keys(kinds).length ? 'ok' : ''}" style="flex:0 0 auto">${done} of ${Object.keys(kinds).length} approved</span></div>
+    <p class="small muted">Photograph each one in good light so every word can be read. The association checks them before you are verified.</p>
+    <div class="list">${Object.entries(kinds).map(([k, label]) => {
+      const d = byKind[k];
+      return `<div class="doc-row">
+        <div><b>${esc(label)}</b>${d ? `<br><span class="tag ${DOC_TAG[d.status][1]}">${DOC_TAG[d.status][0]}</span>${d.note ? `<br><span class="small stale">${esc(d.note)}</span>` : ''}` : '<br><span class="muted small">Not sent yet</span>'}</div>
+        <div class="acts">${d ? `<img class="doc-thumb" src="${esc(d.url)}" alt="${esc(label)}">` : ''}
+          <label class="btn ghost sm doc-pick">${d ? 'Replace' : 'Add photo'}<input type="file" accept="image/*" capture="environment" data-doc="${k}" hidden></label></div></div>`;
+    }).join('')}</div></div>`;
+}
+function bindDocs(after) {
+  $$('[data-doc]').forEach(inp => inp.onchange = async () => {
+    const file = inp.files && inp.files[0]; if (!file) return;
+    const label = inp.closest('.doc-pick'); const was = label.firstChild.nodeValue;
+    label.firstChild.nodeValue = 'Sending…';
+    try {
+      const data = await shrinkPhoto(file);
+      await api(`/driver/docs/${inp.dataset.doc}`, { method: 'PUT', body: { data } });
+      toast('Photo sent. The association will check it.');
+      after();
+    } catch (e) { fail(e); label.firstChild.nodeValue = was; }
+    inp.value = '';
+  });
+}
+
 function bindSub() {
   $$('[data-sub]').forEach(b => b.onclick = () => act(b, async () => {
     if (b.dataset.sub === 'cancel') { await api('/pay/subscription/cancel', { method: 'POST' }); toast('Automatic weekly payment stopped.'); return viewDriver(); }
@@ -1060,7 +1149,7 @@ function bindSub() {
 
 async function viewIslandDriver(d) {
   resetView();
-  const [sum, { ride }, sub, bankInfo, { run }] = await Promise.all([api('/driver/summary'), api('/driver/active'), api('/driver/subscription'), api('/driver/bank'), api('/driver/run')]);
+  const [sum, { ride }, sub, bankInfo, { run }, docInfo] = await Promise.all([api('/driver/summary'), api('/driver/active'), api('/driver/subscription'), api('/driver/bank'), api('/driver/run'), api('/driver/docs')]);
   const { bank, commission_pct: commissionPct } = bankInfo;
   if (run) return renderRun(d, run, sum);
   // GPS: every 4s on a job (screen kept awake), every 15s while waiting online, off when offline
@@ -1112,8 +1201,9 @@ async function viewIslandDriver(d) {
       ${sum.owes_depots ? `<div class="stat"><b>${naira(sum.owes_depots)}</b><span>Charges to hand to depot</span></div>` : ''}</div>
     ${body}
     ${ride ? '' : bankCard(bank, commissionPct)}
+    ${ride ? '' : docsCard(docInfo.kinds, docInfo.docs)}
     <button class="link" id="badge">Show my QR badge</button>`;
-  bindSub(); bindBank();
+  bindSub(); bindBank(); bindDocs(() => viewDriver());
   $('#onl').onclick = (e) => act(e.target, async () => { await api('/driver/online', { method: 'POST', body: { online: !d.online, zone_id: $('#zone').value } }); viewDriver(); });
   $('#zone').onchange = () => api('/driver/online', { method: 'POST', body: { online: d.online, zone_id: $('#zone').value } }).then(() => toast('Area updated.')).catch(fail);
   $('#badge').onclick = () => badgeSheet(d);
@@ -1188,7 +1278,7 @@ function badgeSheet(d) {
 // ---------- bus / Sienna operator ----------
 async function viewOperator(d) {
   resetView();
-  const [{ routes }, { departures }, sub, bankInfo] = await Promise.all([api('/intercity/routes'), api('/intercity/departures/mine'), api('/driver/subscription'), api('/driver/bank')]);
+  const [{ routes }, { departures }, sub, bankInfo, docInfo] = await Promise.all([api('/intercity/routes'), api('/intercity/departures/mine'), api('/driver/subscription'), api('/driver/bank'), api('/driver/docs')]);
   const { bank, commission_pct: commissionPct } = bankInfo;
   const onRoad = departures.some(x => ['boarding', 'departed'].includes(x.status));
   if (onRoad) { GPS.start(5000); GPS.keepAwake(true); } else GPS.stop();
@@ -1198,6 +1288,7 @@ async function viewOperator(d) {
     <h1>${VEH_ICON[d.vehicle_type]} Your departures</h1>
     ${subCard(sub)}
     ${bankCard(bank, commissionPct)}
+    ${docsCard(docInfo.kinds, docInfo.docs)}
     ${onRoad ? '<div id="gpsNote" class="notice gps-note"></div><p class="muted small">Keep this screen open while driving so booked passengers can track the vehicle.</p>' : ''}
     <form id="newDep" class="card"><h3>Add a departure</h3>
       <label class="field"><span class="label">Route</span><select name="route_id" required>${routes.map(r => `<option value="${r.id}">${esc(r.origin)} to ${esc(r.destination)} (${naira(d.vehicle_type === 'bus' ? r.price_bus : r.price_sienna)})</option>`).join('')}</select></label>
@@ -1225,7 +1316,7 @@ async function viewOperator(d) {
     act(b, async () => { await api(`/intercity/departures/${b.dataset.id}/status`, { method: 'POST', body: { status: b.dataset.st } }); viewDriver(); });
   });
   $$('[data-man]').forEach(b => b.onclick = () => manifestSheet(+b.dataset.man));
-  bindSub(); bindBank();
+  bindSub(); bindBank(); bindDocs(() => viewDriver());
   GPS.note();
   poll(() => ($('#modal').classList.contains('show') || userEditing() ? Promise.resolve() : viewDriver()), 20000);
 }
@@ -1596,6 +1687,7 @@ async function adOverview(el) {
         <div class="stat"><b>${o.drivers.approved}</b><span>Verified drivers</span></div>
         <div class="stat"><b>${o.drivers.online}</b><span>Online now</span></div>
         <div class="stat"><b>${o.drivers.pending}</b><span>Waiting for verification</span></div>
+        ${o.docs_pending ? `<div class="stat"><b>${o.docs_pending}</b><span>Documents to check</span></div>` : ''}
         <div class="stat"><b>${o.rides.live}</b><span>Live rides</span></div>
         <div class="stat"><b>${o.rides.today}</b><span>Rides completed today</span></div>
         <div class="stat"><b>${naira(o.rides.value_today)}</b><span>Fares today</span></div>
@@ -1618,23 +1710,27 @@ async function adDrivers(el) {
   const { drivers } = await api('/admin/drivers' + (S.drvFilter ? '?status=' + S.drvFilter : ''));
   el.innerHTML = `<div class="row" style="align-items:end"><label class="field"><span class="label">Show</span><select id="flt">
       ${[['pending', 'Waiting for verification'], ['approved', 'Approved'], ['suspended', 'Suspended'], ['rejected', 'Rejected'], ['', 'All drivers']].map(([v, l]) => `<option value="${v}" ${S.drvFilter === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></div>
-    <div class="table-wrap"><table><thead><tr><th>Driver</th><th>Vehicle</th><th>Plate / permit</th><th>Badge</th><th>Strikes</th><th>Subscription</th><th>Status</th><th></th></tr></thead><tbody>
+    <div class="table-wrap"><table><thead><tr><th>Driver</th><th>Vehicle</th><th>Plate / permit</th><th>Badge</th><th>Documents</th><th>Strikes</th><th>Subscription</th><th>Status</th><th></th></tr></thead><tbody>
     ${drivers.map(d => `<tr><td><b>${esc(d.name)}</b><br><a href="tel:+${esc(d.phone)}">${esc(localPhone(d.phone))}</a></td>
       <td>${VEH_ICON[d.vehicle_type]} ${VEH[d.vehicle_type]}<br><span class="muted small">${esc(d.vehicle_desc || '')}${d.owner_type === 'other' ? `<br>Owner: ${esc(d.owner_name)} ${esc(localPhone(d.owner_phone))}` : '<br>Owner-driver'}</span>
         ${d.account_number ? `<br><span class="small">🏦 ${esc(d.bank_name)} ${esc(d.account_number)}${d.account_verified ? ' ✔' : ' (unverified)'}</span>` : '<br><span class="muted small">No bank account</span>'}</td>
-      <td>${esc(d.plate)}<br>${esc(d.permit_no)}</td><td>${esc(d.badge_code)}</td><td>${d.strikes}/3</td>
+      <td>${esc(d.plate)}<br>${esc(d.permit_no)}</td><td>${esc(d.badge_code)}</td>
+      <td class="small">${d.docs_total ? `${d.docs_ok}/4 approved${d.docs_pending ? `<br><span class="tag warn">${d.docs_pending} to check</span>` : ''}` : '<span class="muted">none sent</span>'}</td>
+      <td>${d.strikes}/3</td>
       <td>${d.sub_paid_until ? `<span class="tag ${d.sub_active ? 'ok' : 'bad'}">${d.sub_active ? 'to ' : 'expired '}${new Date(d.sub_paid_until).toLocaleDateString('en-NG', { day: 'numeric', month: 'short' })}</span>${d.sub_auto ? ' <span class="tag">auto</span>' : ''}` : '<span class="muted small">not started</span>'}
         <br><button class="link small" data-d="add-week" data-id="${d.user_id}">+1 week (cash)</button></td>
       <td><span class="tag ${d.status === 'approved' ? 'ok' : d.status === 'pending' ? 'warn' : 'bad'}">${esc(d.status)}</span>${d.live ? ' <span class="tag">online</span>' : ''}</td>
       <td><div class="acts">
-        ${d.status === 'pending' ? `<button class="btn sm" data-d="approve" data-id="${d.user_id}">Approve</button><button class="btn ghost sm" data-d="reject" data-id="${d.user_id}">Reject</button>` : ''}
+        ${d.status === 'pending' ? `<button class="btn ghost sm" data-u="${d.user_id}">Open</button><button class="btn sm" data-d="approve" data-id="${d.user_id}" data-docs="${d.docs_ok}">Approve</button><button class="btn ghost sm" data-d="reject" data-id="${d.user_id}">Reject</button>` : ''}
         ${d.status === 'approved' ? `<button class="btn ghost sm" data-d="strike" data-id="${d.user_id}">Add strike</button><button class="btn danger sm" data-d="suspend" data-id="${d.user_id}">Suspend</button>` : ''}
         ${['suspended', 'rejected'].includes(d.status) ? `<button class="btn sm" data-d="reinstate" data-id="${d.user_id}">Reinstate</button>` : ''}
-      </div></td></tr>`).join('') || '<tr><td colspan="8" class="muted">No drivers in this list.</td></tr>'}
+      </div></td></tr>`).join('') || '<tr><td colspan="9" class="muted">No drivers in this list.</td></tr>'}
     </tbody></table></div>`;
   $('#flt').onchange = (e) => { S.drvFilter = e.target.value; adDrivers(el).catch(fail); };
+  $$('[data-u]', el).forEach(b => b.onclick = () => userSheet(+b.dataset.u, () => adDrivers(el).catch(fail)));
   $$('[data-d]', el).forEach(b => b.onclick = () => {
     if (b.dataset.d === 'suspend' && !confirm('Suspend this driver? They will be taken offline straight away.')) return;
+    if (b.dataset.d === 'approve' && b.dataset.docs === '0' && !confirm('This driver has no approved documents yet. Approve them anyway?')) return;
     if (b.dataset.d === 'add-week' && !confirm('Record a cash payment and add 1 week to this driver\'s subscription?')) return;
     act(b, async () => { await api(`/admin/drivers/${b.dataset.id}/${b.dataset.d}`, { method: 'POST' }); toast(b.dataset.d === 'add-week' ? '1 week added.' : 'Driver updated.'); adDrivers(el); });
   });
@@ -1735,7 +1831,7 @@ async function adUsers(el) {
 }
 
 async function userSheet(id, refresh) {
-  const { user: u, rides, complaints, actions, paid } = await api('/admin/users/' + id);
+  const { user: u, rides, complaints, actions, paid, documents = [], doc_kinds: docKinds = {} } = await api('/admin/users/' + id);
   const isAdmin = u.role === 'admin' || u.id === S.user.id;
   sheet(`<h3>${esc(u.name)} ${u.banned_at ? '<span class="tag bad">Banned</span>' : ''}</h3>
     <dl class="kv"><dt>Phone</dt><dd><a href="tel:+${esc(u.phone)}">${esc(localPhone(u.phone))}</a>${u.phone_verified ? ' ✔ verified' : ''}</dd>
@@ -1744,6 +1840,16 @@ async function userSheet(id, refresh) {
       ${u.emergency_phone ? `<dt>Emergency contact</dt><dd>${esc(localPhone(u.emergency_phone))}</dd>` : ''}
       <dt>Paid online</dt><dd>${naira(paid)}</dd>
       ${u.banned_at ? `<dt>Banned</dt><dd>${fmtTime(u.banned_at)}: ${esc(u.ban_reason)}</dd>` : ''}</dl>
+    ${u.role === 'driver' ? `<h3>Documents</h3>
+      ${Object.keys(docKinds).length ? `<div class="list">${Object.entries(docKinds).map(([k, label]) => {
+        const d = documents.find(x => x.kind === k);
+        if (!d) return `<div class="item small"><span>${esc(label)}</span><span class="muted">Not sent</span></div>`;
+        return `<div class="card"><div class="row" style="align-items:center"><b class="small">${esc(label)}</b>
+            <span class="tag ${DOC_TAG[d.status][1]}" style="flex:0 0 auto">${DOC_TAG[d.status][0]}</span></div>
+          <img class="doc-full" src="${esc(d.url)}" alt="${esc(label)}" loading="lazy">
+          <p class="muted small">Sent ${fmtTime(d.created_at)}${d.note ? ' · ' + esc(d.note) : ''}</p>
+          ${d.status === 'approved' ? '' : `<div class="row"><button class="btn sm" data-dok="${d.id}">Approve</button><button class="btn ghost sm" data-dno="${d.id}" data-lbl="${esc(label)}">Reject</button></div>`}</div>`;
+      }).join('')}</div>` : ''}` : ''}
     ${complaints.length ? `<h3>Complaints</h3><div class="list">${complaints.map(c => `<div class="item small"><span>${esc(c.text)}<br><span class="muted">${esc(c.kind)} · ${fmtTime(c.created_at)} · ${esc(c.status)}</span></span></div>`).join('')}</div>` : ''}
     <h3>Recent trips</h3>
     <div class="list">${rides.map(r => `<div class="item small"><span>${SERVICE[r.service || 'ride'].icon} ${esc(r.from_name)} to ${esc(r.to_name)}<br><span class="muted">${fmtTime(r.created_at)} · ${esc(r.as_role)} · ${esc(r.status)}</span></span><b>${naira(r.fare)}</b></div>`).join('') || '<p class="muted small">No trips.</p>'}</div>
@@ -1765,6 +1871,18 @@ async function userSheet(id, refresh) {
     </div>`}
     <button class="btn ghost" id="closeS">Close</button>`, true);
   $('#closeS').onclick = closeSheet;
+  $$('[data-dok]').forEach(b => b.onclick = () => act(b, async () => {
+    await api(`/admin/users/${u.id}/docs/${b.dataset.dok}`, { method: 'POST', body: { action: 'approved' } });
+    toast('Document approved.'); closeSheet(); userSheet(u.id, refresh).catch(fail);
+  }));
+  $$('[data-dno]').forEach(b => b.onclick = () => {
+    const note = prompt(`Why is the ${b.dataset.lbl.toLowerCase()} being rejected? The driver sees this.`);
+    if (!note || !note.trim()) return;
+    act(b, async () => {
+      await api(`/admin/users/${u.id}/docs/${b.dataset.dno}`, { method: 'POST', body: { action: 'rejected', note } });
+      toast('Document rejected. The driver will see why.'); closeSheet(); userSheet(u.id, refresh).catch(fail);
+    });
+  });
   if (isAdmin) return;
   const reason = () => $('#modReason').value.trim();
   if ($('#ban')) $('#ban').onclick = (e) => act(e.target, async () => {
@@ -1906,6 +2024,11 @@ async function adSettings(el) {
       <span class="muted small">Switching to weekly gives every driver the free trial days below, counted from the day you switch, so nobody is locked out suddenly.</span></label>
     ${f('campaign_end', 'Campaign end (optional, shown to drivers)', 'e.g. 31 December 2026. Leave empty to show no date.')}
     <div class="row">${f('weekly_subscription', 'Weekly fee (₦)', 'Kept ready for when you switch to weekly.', 'number')}${f('subscription_trial_days', 'Free trial (days)', 'Given to every driver on the day you switch.', 'number')}</div>
+    <h3>Driver documents</h3>
+    <label class="field"><span class="label">Before a driver can be approved</span><select name="require_driver_docs">
+      <option value="" ${s.require_driver_docs === 'on' ? '' : 'selected'}>Documents are optional (check them at the desk)</option>
+      <option value="on" ${s.require_driver_docs === 'on' ? 'selected' : ''}>Every document must be approved first</option></select>
+      <span class="muted small">Drivers photograph their ID, vehicle papers, permit and vehicle in the app; you approve each one from Drivers → Open.</span></label>
     <h3>Safety</h3>
     ${f('safety_desk_phone', 'Safety desk phone (234…)', 'Shown on every SOS screen.', 'tel')}
     <button class="btn" type="submit">Save settings</button></form>`;

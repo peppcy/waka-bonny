@@ -226,3 +226,10 @@ details summary{cursor:pointer;color:var(--water);font-weight:600;padding:.3rem 
 
 /* Side-by-side fields: keep labels on one line so the input boxes line up */
 .row > .field > .label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* Driver documents */
+.doc-row{display:flex;justify-content:space-between;align-items:center;gap:.75rem;background:var(--surface2);border:1px solid var(--line);border-radius:14px;padding:.7rem .8rem;font-size:.92rem}
+.doc-row .acts{display:flex;align-items:center;gap:.5rem;flex-shrink:0}
+.doc-thumb{width:52px;height:52px;object-fit:cover;border-radius:10px;border:1px solid var(--line);background:var(--surface)}
+.doc-pick{display:inline-flex;align-items:center;justify-content:center;cursor:pointer;margin:0}
+.doc-full{width:100%;max-height:60vh;object-fit:contain;border-radius:12px;background:var(--surface2)}

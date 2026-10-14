@@ -4,8 +4,20 @@ const { quote, getSettings } = require('../lib/fares');
 const { wrap, int, bad, HttpError } = require('../lib/util');
 const { rideTrack } = require('../lib/track');
 const P = require('../lib/packages');
+const docs = require('../lib/docs');
 const rateLimit = require('express-rate-limit');
 const pkgLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false });
+
+function mapConfig() {
+  const key = (process.env.MAPTILER_KEY || '').trim();
+  if (!key) return { provider: 'osm' };
+  const withKey = (u) => u.includes('key=') ? u : u + (u.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(key);
+  return {
+    provider: 'maptiler',
+    streets: withKey(process.env.MAPTILER_STREETS_URL || `https://api.maptiler.com/maps/${process.env.MAPTILER_STREETS_STYLE || 'streets-v2'}/256/{z}/{x}/{y}.png`),
+    satellite: withKey(process.env.MAPTILER_SATELLITE_URL || `https://api.maptiler.com/maps/${process.env.MAPTILER_SATELLITE_STYLE || 'satellite'}/256/{z}/{x}/{y}.jpg`)
+  };
+}
 
 router.get('/meta', wrap(async (req, res) => {
   const zones = (await q('SELECT id, name FROM zones WHERE active ORDER BY sort, name')).rows;
@@ -14,6 +26,10 @@ router.get('/meta', wrap(async (req, res) => {
     night_start_hour: s.night_start_hour, night_end_hour: s.night_end_hour, night_surcharge: s.night_surcharge,
     intercity_open_hour: s.intercity_open_hour, intercity_close_hour: s.intercity_close_hour,
     parcel_fee: s.parcel_fee, errand_fee: s.errand_fee, online_payments: !!process.env.PAYSTACK_SECRET_KEY,
+    // Map tiles: MapTiler when a key is set, otherwise the free OpenStreetMap / Esri layers.
+    // Paste the exact URLs from your MapTiler account into MAPTILER_STREETS_URL / MAPTILER_SATELLITE_URL
+    // if the defaults below do not match the maps on your plan.
+    maps: mapConfig(),
     safety_desk_phone: s.safety_desk_phone
   }});
 }));
@@ -100,6 +116,17 @@ router.post('/package/:token/collect', pkgLimiter, wrap(async (req, res) => {
   if (p.status !== 'delivery_requested') throw bad(p.status === 'assigned' ? 'A driver has already been assigned. Call the depot to change this.' : 'Nothing to change.');
   await q(`UPDATE packages SET status='at_depot', updated_at=now() WHERE id=$1`, [p.id]);
   res.json(publicView(await pkgByToken(req.params.token)));
+}));
+
+// A driver's document, shown only through the short-lived signed link the app generates
+router.get('/doc/:token', wrap(async (req, res) => {
+  const id = docs.readViewToken(req.params.token);
+  const d = (await q('SELECT mime, bytes FROM driver_docs WHERE id=$1', [id])).rows[0];
+  if (!d) throw new HttpError(404, 'Document not found.');
+  res.set('Content-Type', d.mime);
+  res.set('Cache-Control', 'private, max-age=600');
+  res.set('Content-Disposition', 'inline');
+  res.send(d.bytes);
 }));
 
 module.exports = router;

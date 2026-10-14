@@ -6,6 +6,7 @@ const { auth } = require('../lib/auth');
 const { wrap, bad, int, clean, HttpError } = require('../lib/util');
 const { phoneHash } = require('./auth');
 const ps = require('../lib/paystack');
+const docs = require('../lib/docs');
 
 router.use(auth('admin'));
 
@@ -60,7 +61,20 @@ router.get('/:id', wrap(async (req, res) => {
   const actions = (await q(`SELECT a.action, a.reason, a.created_at, ad.name AS admin_name FROM admin_actions a JOIN users ad ON ad.id=a.admin_id
     WHERE a.user_id=$1 ORDER BY a.id DESC LIMIT 20`, [id])).rows;
   const paid = (await q(`SELECT COALESCE(sum(amount) FILTER (WHERE status='success'),0)::int AS total FROM payments WHERE user_id=$1`, [id])).rows[0].total;
-  res.json({ user: u, rides, complaints, actions, paid });
+  const documents = u.role === 'driver' ? await docs.listFor(id) : [];
+  res.json({ user: u, rides, complaints, actions, paid, documents, doc_kinds: docs.KINDS });
+}));
+
+// Approve or reject one document
+router.post('/:id/docs/:docId', wrap(async (req, res) => {
+  const action = req.body?.action;
+  if (!['approved', 'rejected'].includes(action)) throw bad('Choose approve or reject.');
+  const note = clean(req.body?.note, 200);
+  if (action === 'rejected' && !note) throw bad('Say what is wrong with it, so the driver knows what to send instead.');
+  const r = (await q(`UPDATE driver_docs SET status=$1, note=$2, reviewed_by=$3, reviewed_at=now()
+      WHERE id=$4 AND user_id=$5 RETURNING kind`, [action, note, req.user.id, int(req.params.docId), int(req.params.id)])).rows[0];
+  if (!r) throw new HttpError(404, 'Document not found.');
+  res.json({ ok: true });
 }));
 
 router.post('/:id/ban', wrap(async (req, res) => {
@@ -114,6 +128,7 @@ router.post('/:id/delete', wrap(async (req, res) => {
     await c.query(`UPDATE drivers SET status='rejected', online=false, lat=NULL, lng=NULL, plate='DELETED', permit_no='DELETED', vehicle_desc=NULL,
         badge_code=$2, sub_code=NULL, sub_email_token=NULL, sub_auto=false WHERE user_id=$1`, [u.id, 'X' + crypto.randomBytes(6).toString('hex').toUpperCase()]);
     await c.query('DELETE FROM otps WHERE phone=$1', [u.phone]);
+    await c.query('DELETE FROM driver_docs WHERE user_id=$1', [u.id]);
     if (req.body?.block_phone) await c.query('INSERT INTO blocked_phones(phone_hash, reason) VALUES($1,$2) ON CONFLICT DO NOTHING', [phoneHash(u.phone), reason]);
     await c.query(`UPDATE users SET name='Deleted user', phone=$2, pin_hash='!', emergency_phone=NULL, deleted_at=now(),
         banned_at=COALESCE(banned_at, now()), ban_reason=$3 WHERE id=$1`, [u.id, `deleted-${u.id}-${crypto.randomBytes(4).toString('hex')}`, reason]);

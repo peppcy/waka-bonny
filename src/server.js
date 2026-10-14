@@ -7,6 +7,8 @@ const { q } = require('./lib/db');
 
 const app = express();
 app.set('trust proxy', 1);
+// Driver documents arrive as a shrunk photo, so that one route allows a bigger body
+app.use('/api/driver/docs', express.json({ limit: '3mb' }));
 // Keep the raw body so the Paystack webhook signature can be checked
 app.use(express.json({ limit: '100kb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 const origins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);

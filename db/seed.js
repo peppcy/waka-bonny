@@ -26,7 +26,7 @@ const routes = require('../config/intercity');
     safety_desk_phone: null, weekly_subscription: null,
     subscription_trial_days: '7', parcel_fee: null, errand_fee: null,
     subscription_mode: 'free', campaign_end: null,
-    platform_commission_pct: '0', paystack_fee_bearer: 'driver'
+    platform_commission_pct: '0', paystack_fee_bearer: 'driver', require_driver_docs: null
   };
   for (const [k, v] of Object.entries(defaults)) {
     await q('INSERT INTO settings(key, value) VALUES($1,$2) ON CONFLICT (key) DO NOTHING', [k, v]);

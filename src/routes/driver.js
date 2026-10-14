@@ -6,6 +6,7 @@ const { wrap, bad, int, HttpError } = require('../lib/util');
 const { coord, addPoint, paxFresh } = require('../lib/track');
 const { subState, requireActiveSub } = require('../lib/subs');
 const { ensureSubaccount, splitSettings } = require('../lib/split');
+const docs = require('../lib/docs');
 const ps = require('../lib/paystack');
 const { clean } = require('../lib/util');
 const { km, byDistance } = require('../lib/geo');
@@ -22,6 +23,28 @@ router.use(auth('driver'));
 router.get('/status', driver({ allowPending: true }), wrap(async (req, res) => res.json({ driver: req.driver })));
 
 router.get('/subscription', driver({ allowPending: true }), wrap(async (req, res) => res.json(await subState(req.driver))));
+
+// ---- Documents: the driver photographs them in the app; the association reviews them in the Desk ----
+router.get('/docs', driver({ allowPending: true }), wrap(async (req, res) => {
+  res.json({ kinds: docs.KINDS, docs: await docs.listFor(req.user.id) });
+}));
+
+router.put('/docs/:kind', driver({ allowPending: true }), wrap(async (req, res) => {
+  const kind = req.params.kind;
+  if (!docs.KINDS[kind]) throw bad('Unknown document.');
+  const { mime, buf } = docs.decodeUpload(req.body && req.body.data);
+  // Re-uploading replaces the old one and puts it back in the queue for review
+  await q(`INSERT INTO driver_docs(user_id, kind, mime, bytes, size) VALUES($1,$2,$3,$4,$5)
+      ON CONFLICT (user_id, kind) DO UPDATE SET mime=EXCLUDED.mime, bytes=EXCLUDED.bytes, size=EXCLUDED.size,
+        status='pending', note=NULL, reviewed_by=NULL, reviewed_at=NULL, created_at=now()`,
+    [req.user.id, kind, mime, buf, buf.length]);
+  res.json({ docs: await docs.listFor(req.user.id) });
+}));
+
+router.delete('/docs/:kind', driver({ allowPending: true }), wrap(async (req, res) => {
+  await q('DELETE FROM driver_docs WHERE user_id=$1 AND kind=$2', [req.user.id, req.params.kind]);
+  res.json({ docs: await docs.listFor(req.user.id) });
+}));
 
 // ---- Bank account, so customers can pay by transfer (verified with the bank through Paystack) ----
 let bankCache = { at: 0, list: [] };
